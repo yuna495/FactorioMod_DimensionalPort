@@ -486,12 +486,12 @@ local function add_display_count(counts, key, amount)
   end
 end
 
-local function displayed_item_counts(port, port_type)
+local function displayed_item_counts()
   local counts = {}
   for key, count in pairs(storage.dimensional_storage.items) do
     add_display_count(counts, key, count)
   end
-  if port_type == "item" and port and port.mode == "request" then
+  for _, port in pairs(storage.item_ports) do
     for key, count in pairs(port.materialized or {}) do
       add_display_count(counts, key, count)
     end
@@ -499,27 +499,25 @@ local function displayed_item_counts(port, port_type)
   return counts
 end
 
-local function add_storage_list(parent, search, port, port_type)
-  local storage_frame = parent.add{type = "frame", direction = "vertical", caption = {"dimensional-port.storage"}}
-  storage_frame.add{
-    type = "textfield",
-    name = "dimensional_port_search",
-    text = search or "",
-    tags = {action = "search"}
+local function add_storage_table(parent, search)
+  local table_element = parent.add{
+    type = "table",
+    name = "dimensional_port_storage_table",
+    column_count = 6
   }
-  local table_element = storage_frame.add{type = "table", column_count = 6}
   local lowered = string.lower(search or "")
-  for key, count in pairs(displayed_item_counts(port, port_type)) do
+  for key, count in pairs(displayed_item_counts()) do
     local name, quality = split_item_key(key)
     local prototype = prototypes.item[name]
     local local_name = prototype and prototype.localised_name or name
     local searchable = string.lower(name .. " " .. quality)
     if count > 0 and (lowered == "" or searchable:find(lowered, 1, true)) then
-      table_element.add{type = "sprite", sprite = "item/" .. name}
+      local tooltip = {"dimensional-port.item-tooltip", local_name, quality, count}
+      table_element.add{type = "sprite", sprite = "item/" .. name, tooltip = tooltip}
       table_element.add{
         type = "label",
         caption = compact_count(count),
-        tooltip = {"dimensional-port.item-tooltip", local_name, quality, count}
+        tooltip = tooltip
       }
     end
   end
@@ -528,14 +526,42 @@ local function add_storage_list(parent, search, port, port_type)
     local local_name = prototype and prototype.localised_name or name
     local searchable = string.lower(name)
     if amount > 0 and (lowered == "" or searchable:find(lowered, 1, true)) then
-      table_element.add{type = "sprite", sprite = "fluid/" .. name}
+      local tooltip = {"dimensional-port.fluid-tooltip", local_name, amount}
+      table_element.add{type = "sprite", sprite = "fluid/" .. name, tooltip = tooltip}
       table_element.add{
         type = "label",
         caption = compact_count(amount),
-        tooltip = {"dimensional-port.fluid-tooltip", local_name, amount}
+        tooltip = tooltip
       }
     end
   end
+end
+
+local function add_storage_list(parent, search)
+  local storage_frame = parent.add{
+    type = "frame",
+    name = "dimensional_port_storage_frame",
+    direction = "vertical",
+    caption = {"dimensional-port.storage"}
+  }
+  storage_frame.add{
+    type = "textfield",
+    name = "dimensional_port_search",
+    text = search or "",
+    tags = {action = "search"}
+  }
+  add_storage_table(storage_frame, search)
+end
+
+local function refresh_storage_list(player)
+  local frame = player.gui.screen.dimensional_port_frame
+  if not frame then return end
+  local storage_frame = frame.dimensional_port_storage_frame
+  if not storage_frame then return end
+  local old_table = storage_frame.dimensional_port_storage_table
+  if old_table then old_table.destroy() end
+  local state = player_state(player.index)
+  add_storage_table(storage_frame, state.search)
 end
 
 local function build_gui(player, port, port_type)
@@ -567,7 +593,7 @@ local function build_gui(player, port, port_type)
       add_fluid_request(frame, port)
     end
   end
-  add_storage_list(frame, state.search, port, port_type)
+  add_storage_list(frame, state.search)
   player.opened = frame
 end
 
@@ -690,6 +716,9 @@ script.on_nth_tick(UPDATE_INTERVAL, function()
   ensure_storage()
   process_item_ports()
   process_fluid_ports()
+  for _, player in pairs(game.connected_players) do
+    refresh_storage_list(player)
+  end
 end)
 
 script.on_event(defines.events.on_gui_opened, function(event)
@@ -784,5 +813,5 @@ script.on_event(defines.events.on_gui_text_changed, function(event)
   if not player then return end
   local state = player_state(player.index)
   state.search = element.text
-  refresh_gui(player)
+  refresh_storage_list(player)
 end)
