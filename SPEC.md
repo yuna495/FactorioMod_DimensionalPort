@@ -83,6 +83,21 @@ Item PortのEntityサイズは **1×1 tile** とする。
 
 ---
 
+### 3.3 Inventory
+
+Item Portの内部Inventoryサイズは、通常の鋼鉄チェストと同等とする。
+
+初期実装では、vanillaの鋼鉄チェストに準拠したInventory容量を使用する。
+
+このInventoryは以下の用途に使用する。
+
+* Supplyモードで、外部から投入されたアイテムをDimensional Storageへ送るまでの一時バッファ
+* Requestモードで、Dimensional Storageから実体化したアイテムを外部へ取り出すための一時バッファ
+
+Dimensional StorageそのものをItem PortのInventoryへ保持してはならない
+
+---
+
 ## 4. Supplyモード
 
 ### 4.1 基本動作
@@ -157,6 +172,24 @@ Requestモードでは、プレイヤーが取り出したいアイテムをGUI�
 
 ---
 
+## 5.2 最大要求アイテム数
+
+一つのItem Portで同時に指定可能な要求アイテム数は、最大9種類とする。
+
+Item Portの内部Inventoryは48スロットであり、各要求アイテムについて5スタック分を維持するため、
+
+5スタック × 9種類 = 45スロット
+
+を最大要求数とする。
+
+残り3スロットについては、要求アイテム数の追加には使用しない。
+
+要求アイテム数が9種類を超える設定は許可しない。
+
+各要求スロットでは、アイテムおよび品質を指定できる。
+
+---
+
 ## 6. Request内部バッファ
 
 ### 6.1 基本容量
@@ -184,6 +217,12 @@ stack_sizeが200なら、
 ```
 
 となる。
+
+Requestモードでは、外部からItem Port内部Inventoryへのアイテム投入を受け付けない。
+
+Requestモードの内部Inventoryは、Dimensional Storageから実体化された要求アイテムを保持し、インサータ、ローダー、プレイヤー等によって外部へ取り出すためのバッファとして使用する。
+
+要求対象外のアイテムによって内部Inventoryが占有され、各要求アイテムの5スタック維持が妨げられる状態を許可しない。
 
 ---
 
@@ -422,9 +461,13 @@ SupplyからRequestへ変更する場合も、変更時点で内部Inventoryに�
 
 ## 12. Entity破壊・撤去
 
-Dimensional Portが撤去・破壊された場合、内部Inventoryに残っているDimensional Storage由来の物資を適切にDimensional Storageへ返却する。
+Dimensional Portが撤去・破壊された場合、内部Inventoryまたはfluidboxに残っている内容物を、そのモードおよび由来に応じて安全に処理する。
 
-Portの撤去・破壊によってアイテムの複製または消失が発生してはならない。
+RequestモードでDimensional Storageから実体化された物資はDimensional Storageへ返却する。
+
+SupplyモードでまだDimensional Storageへ吸収されていない物資については、通常のEntity撤去・破壊時の挙動を尊重し、不当にDimensional Storageへ送信したり消失させたりしてはならない。
+
+Portの撤去・破壊によってアイテムまたは流体の複製・不当な消失が発生してはならない。
 
 通常のプレイヤー操作による採掘だけでなく、Entity死亡、スクリプトによる削除等についても考慮する。
 
@@ -493,6 +536,22 @@ Factorioの物流ネットワーク在庫表示に近い形式を使用する。
 
 ---
 
+### 14.2 GUIレイアウト
+
+GUIの具体的な配置、各要素のサイズ、列数、スクロール領域等については、初期実装後に実際のゲーム画面上で操作性を確認しながら調整する。
+
+現時点では以下の機能要件のみを固定する。
+
+* Supply / Requestモード切替
+* Requestモード時の要求アイテム指定
+* Dimensional Storage内のアイテム一覧
+* アイコンおよび数量表示
+* アイテム検索
+
+GUIの視覚的な配置について、SPECに記載されていない部分を実装上の恒久仕様として扱わない。
+
+---
+
 ## 15. アイテム検索
 
 Dimensional Storage一覧には検索機能を設ける。
@@ -511,12 +570,10 @@ Dimensional Storage一覧には検索機能を設ける。
 
 流体についてもItem Portと同様にDimensional Storageへ数量として保存する。
 
-Fluid Portも、
+Fluid Portは一つのEntity Prototypeを使用し、各設置個体について以下のモードを切り替える。
 
 * `Supply`
 * `Request`
-
-を同一Entity上で切り替える。
 
 ---
 
@@ -528,50 +585,133 @@ Fluid PortのEntityサイズは **1×1 tile** とする。
 
 これは初期実装用の暫定グラフィックであり、将来的にDimensional Port専用のグラフィックへ変更する予定である。
 
-外観の変更によって、Fluid Portの基本機能・保存データ・設置済みEntityとの互換性を不必要に損なわない設計とする。
+---
+
+### 16.3 Fluidbox容量
+
+Fluid Portのfluidbox容量は、
+
+**25,000 fluid**
+
+とする。
+
+この容量はSupplyおよびRequestの両モードで共通とする。
 
 ---
 
-### 16.3 Supply
+### 16.4 Supply
 
-Supplyモードでは、Fluid Portへ流入した流体を一定周期でDimensional Storageへ吸収する。
+Supplyモードでは、Fluid Portへ流入した流体をDimensional Storageへ吸収する。
 
-Item Portと同様、異次元空間への送信側として動作する。
+処理周期は原則として、
+
+**30 tickごと**
+
+とする。
+
+処理時点でFluid Portのfluidboxに存在する流体を、数量にかかわらず可能な限りすべてDimensional Storageへ移動する。
+
+吸収後、その数量をFluid Portのfluidboxから削除する。
+
+Dimensional Storageへ保存した数量とfluidboxから削除した数量は必ず一致させ、流体の複製または消失を発生させてはならない。
 
 ---
 
-### 16.4 Request
+### 16.5 Request
 
 Requestモードでは、一つのFluid Portにつき一種類の流体を指定する。
 
-Item Portと異なり、複数種類の流体を同一Fluid Portから同時出力しない。
+複数種類の流体を同一Fluid Portから同時に出力してはならない。
 
-指定された流体のみをPortのfluidboxへ供給する。
+30 tickごとに、指定流体についてfluidboxの不足量を計算し、最大容量である25,000まで維持する。
 
-Dimensional Storageに存在する数量を超えて生成してはならない
+例：
+
+```text
+Fluid Port容量：25,000
+現在：8,000
+
+Dimensional Storageに十分な在庫あり
+
+→ 17,000供給
+→ Fluid Port：25,000
+```
+
+Dimensional Storageの在庫が不足している場合は、存在する数量のみ供給する。
+
+例：
+
+```text
+Fluid Port容量：25,000
+現在：0
+
+Dimensional Storage：
+硫酸 4,500
+
+→ 4,500供給
+→ Dimensional Storage：0
+```
+
+新たな流体がSupply PortからDimensional Storageへ追加された場合、以後の更新で再び補充する。
+
+同一流体を複数のRequest Fluid Portが要求しており、すべてのPortの不足量を満たすだけのDimensional Storage在庫が存在しない場合、利用可能な流体を各Portの不足量を上限として可能な限り均等に配分する。
+
+Entityの処理順によって、先に処理されたFluid Portだけが在庫を取得する仕様にしてはならない。
 
 ---
 
 ## 17. 流体温度
 
-温度が異なる同一流体については、異なる状態として扱うことを基本方針とする。
+温度が異なる同一流体については、将来的には異なる状態として扱うことを基本方針とする。
 
-例：
+ただし、温度付き流体の具体的な保存方式、取り出し方式およびGUI仕様は現時点では未確定である。
+
+初回実装では、温度差を持つ流体の完全な保存・復元対応は実装対象外とする。
+
+温度依存流体について不正確な温度変換、意図しない混合、流体生成が発生する可能性がある場合、その流体を安全に処理できない状態として扱い、推測による変換処理を実装してはならない。
+
+温度付き流体への正式対応は、Factorio 2.0のFluid APIおよび実際のゲーム挙動を確認したうえで別途仕様を確定する
+---
+
+## 18. Recipe・Technology
+
+### 18.1 Item Port
+
+初期開発およびテスト段階では、Item PortのCrafting Recipeを以下とする。
 
 ```text
-Steam 165℃
-Steam 500℃
+鉄板 × 5
+→ Dimensional Item Port × 1
 ```
 
-を無条件に同一在庫として混合しない。
+このRecipeは暫定仕様である。
 
-ただし、Factorio 2.0におけるFluid Prototype、fluidbox、温度処理の正確な仕様を確認した上で、具体的な内部データ構造およびGUI仕様を決定する。
-
-この部分は実装前にFactorio 2.0 API仕様を確認すること。
+ゲームバランス調整および最終Recipeの決定は、基本機能の実装完了後に行う。
 
 ---
 
-## 18. 回路ネットワーク
+### 18.2 Fluid Port
+
+初期開発およびテスト段階では、Fluid PortのCrafting Recipeを以下とする。
+
+```text
+鉄板 × 5
+→ Dimensional Fluid Port × 1
+```
+
+このRecipeは暫定仕様である。
+
+---
+
+### 18.3 Technology
+
+初期実装では、Item PortおよびFluid Portをゲーム開始時から利用可能とする。
+
+専用Technologyによる研究解放は要求しない。
+
+Technologyおよび研究コストについては、ゲームバランス調整時に将来的な変更を検討する。
+
+## 19. 回路ネットワーク
 
 回路ネットワーク対応は将来実装とする。
 
@@ -593,7 +733,7 @@ Steam 500℃
 
 ---
 
-## 19. 更新処理とUPS
+## 20. 更新処理とUPS
 
 UPS負荷を考慮し、すべての処理を毎tick実行することを前提としない。
 
@@ -619,7 +759,7 @@ UPS負荷を考慮し、すべての処理を毎tick実行することを前提�
 
 ---
 
-## 20. アイテム総量保存則
+## 21. 物資総量保存則
 
 Dimensional Portは無限アイテム生成装置ではない。
 
@@ -648,7 +788,7 @@ Dimensional Storage内数量
 
 ---
 
-## 21. MODの世界観上の定義
+## 22. MODの世界観上の定義
 
 Dimensional Portは、通常空間とは異なる共有された異次元空間へ物質を送り込み、必要に応じて再び通常空間へ取り出すための装置である。
 
@@ -676,7 +816,7 @@ Dimensional Portは、通常空間とは異なる共有された異次元空間�
 
 ---
 
-## 22. 初回実装範囲
+## 23. 初回実装範囲
 
 初回実装では以下を優先する。
 
@@ -700,21 +840,18 @@ Fluid PortについてはItem Portの基本実装を基礎として実装する�
 
 ---
 
-## 23. 未確定事項
+## 24. 未確定事項
 
 以下は現時点では確定仕様としない。
 
-* Item PortのInventoryサイズ
-* 一つのItem Portで指定可能な最大要求アイテム数
-* GUIの具体的なレイアウト
-* Crafting Recipe
-* Technology
-* Fluid Portの容量
-* Fluid Portの具体的な転送量
-* 温度付き流体の内部表現
+* GUIの具体的な視覚レイアウト
+* Item PortおよびFluid Portの最終的な専用グラフィック
+* 最終的なCrafting Recipeおよびコスト
+* 将来的なTechnologyおよび研究コスト
+* 温度付き流体の具体的な内部表現
 * 回路ネットワーク対応方式
 * 大量Port設置時の具体的な更新分散アルゴリズム
 
 これらは実装・性能測定・Factorio 2.0 API仕様確認を行った上で決定する。
 
-未確定事項について、実装時に推測で仕様を確定してはならない。
+未確定事項について、実装時に推測で恒久仕様を確定してはならない。
