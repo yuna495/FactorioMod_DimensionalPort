@@ -1,4 +1,6 @@
 *.zip
+.codex-test-mods/
+.codex-test-output/
 DimensionalPort_*/
 DimensionalPort_*.zip
 MODポータル用
