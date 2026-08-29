@@ -485,6 +485,8 @@ Factorio 2.0のQualityに対応する。
 
 同一Item Prototypeであっても品質が異なる場合、別の在庫として管理する。
 
+Factorio公式のQuality MODが有効な環境では、そのQuality Prototypeおよび品質対応GUIを使用できるよう、MOD読み込み順を考慮する。
+
 例：
 
 ```text

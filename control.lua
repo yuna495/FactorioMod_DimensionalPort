@@ -469,7 +469,6 @@ local function add_item_requests(parent, port)
     request_table.add{
       type = "choose-elem-button",
       elem_type = "item-with-quality",
-      style = "slot_button",
       ["item-with-quality"] = request and {name = request.name, quality = quality_name(request.quality)} or nil,
       tags = {action = "item-request", index = index}
     }
