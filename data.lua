@@ -3,7 +3,9 @@ local names = require("prototypes.names")
 local item_port_icon = "__DimensionalPort__/graphics/icons/dimensional-item-port.png"
 local fluid_port_icon = "__DimensionalPort__/graphics/icons/dimensional-fluid-port.png"
 local item_port_picture = "__DimensionalPort__/graphics/entity/dimensional-item-port/dimensional-item-port.png"
+local item_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-item-port/dimensional-item-port-shadow.png"
 local fluid_port_overlay = "__DimensionalPort__/graphics/entity/dimensional-fluid-port/dimensional-fluid-port-overlay.png"
+local fluid_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-fluid-port/dimensional-fluid-port-shadow.png"
 
 local function tint_sprite(sprite, tint)
   if type(sprite) ~= "table" then return end
@@ -21,9 +23,21 @@ local function fluid_port_overlay_sprite()
   return {
     filename = fluid_port_overlay,
     priority = "extra-high",
-    width = 96,
-    height = 96,
-    shift = util.by_pixel(0, -4),
+    width = 128,
+    height = 128,
+    shift = util.by_pixel(0, -8),
+    scale = 0.5
+  }
+end
+
+local function fluid_port_shadow_sprite()
+  return {
+    filename = fluid_port_shadow,
+    priority = "extra-high",
+    width = 128,
+    height = 128,
+    shift = util.by_pixel(0, -8),
+    draw_as_shadow = true,
     scale = 0.5
   }
 end
@@ -33,6 +47,7 @@ local function overlay_pipe_sprite(sprite)
 
   local copy = table.deepcopy(sprite)
   if copy.layers then
+    copy.layers[#copy.layers + 1] = fluid_port_shadow_sprite()
     copy.layers[#copy.layers + 1] = fluid_port_overlay_sprite()
     return copy
   end
@@ -40,6 +55,7 @@ local function overlay_pipe_sprite(sprite)
   return {
     layers = {
       copy,
+      fluid_port_shadow_sprite(),
       fluid_port_overlay_sprite()
     }
   }
@@ -89,11 +105,20 @@ item_port.circuit_wire_max_distance = nil
 item_port.picture = {
   layers = {
     {
+      filename = item_port_shadow,
+      priority = "extra-high",
+      width = 128,
+      height = 128,
+      shift = util.by_pixel(0, -8),
+      draw_as_shadow = true,
+      scale = 0.5
+    },
+    {
       filename = item_port_picture,
       priority = "extra-high",
-      width = 96,
-      height = 96,
-      shift = util.by_pixel(0, -4),
+      width = 128,
+      height = 128,
+      shift = util.by_pixel(0, -8),
       scale = 0.5
     }
   }
