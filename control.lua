@@ -226,6 +226,9 @@ local function normalise_fluid_port_state(port, entity)
   return port
 end
 
+local item_port_request_keys
+local rebalance_item_request_keys
+
 local function clear_destroy_registration(port)
   if port and port.destroy_registration then
     storage.destroy_registrations[port.destroy_registration] = nil
@@ -281,11 +284,15 @@ local function unregister_item_port(entity)
   if not (entity and entity.valid) then return end
   local port = storage.item_ports[entity.unit_number]
   if not port then return end
+  local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
   if port.mode == "request" then
     absorb_inventory_to_storage(entity)
   end
   clear_destroy_registration(port)
   storage.item_ports[entity.unit_number] = nil
+  if port.mode == "request" then
+    rebalance_item_request_keys(affected_keys)
+  end
 end
 
 local function unregister_fluid_port(entity)
@@ -304,11 +311,15 @@ local function unregister_fluid_port(entity)
 end
 
 local function unregister_lost_item_port(unit_number, port)
+  local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
   if port.mode == "request" then
     return_materialized_items_to_storage(port)
   end
   clear_destroy_registration(port)
   storage.item_ports[unit_number] = nil
+  if port.mode == "request" then
+    rebalance_item_request_keys(affected_keys)
+  end
 end
 
 local function unregister_lost_fluid_port(unit_number, port)
@@ -407,10 +418,14 @@ local function on_registered_object_destroyed(event)
   if registration.port_type == "item" then
     local port = storage.item_ports[registration.unit_number]
     if port then
+      local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
       if port.mode == "request" then
         return_materialized_items_to_storage(port)
       end
       storage.item_ports[registration.unit_number] = nil
+      if port.mode == "request" then
+        rebalance_item_request_keys(affected_keys)
+      end
     end
   elseif registration.port_type == "fluid" then
     local port = storage.fluid_ports[registration.unit_number]
@@ -514,6 +529,141 @@ local function distribute_fluid_amount(total, requests)
 
     if assigned_this_round <= 0.000001 then break end
     active = next_active
+  end
+end
+
+local function item_port_requests_key(port, key)
+  for index = 1, MAX_ITEM_REQUESTS do
+    local request = port.requests and port.requests[index]
+    if item_request_is_available(request) and item_key(request.name, request.quality) == key then
+      return true
+    end
+  end
+  return false
+end
+
+item_port_request_keys = function(port)
+  local keys = {}
+  for index = 1, MAX_ITEM_REQUESTS do
+    local request = port.requests and port.requests[index]
+    if item_request_is_available(request) then
+      keys[item_key(request.name, request.quality)] = true
+    end
+  end
+  return keys
+end
+
+local function sync_materialized_item_count(port, key)
+  port.materialized = port.materialized or {}
+  local materialized = port.materialized[key] or 0
+  if materialized <= 0 then return 0 end
+
+  local name, quality = split_item_key(key)
+  local inventory = get_main_inventory(port.entity)
+  if not inventory then
+    port.materialized[key] = nil
+    return 0
+  end
+
+  local actual = inventory_count(inventory, name, quality)
+  if actual < materialized then
+    materialized = actual
+    port.materialized[key] = materialized > 0 and materialized or nil
+  end
+  return materialized
+end
+
+local function collect_item_rebalance_requesters(key)
+  local name, quality = split_item_key(key)
+  if not (prototypes.item[name] and quality_is_available(quality)) then return {} end
+
+  local requesters = {}
+  for _, port in pairs(storage.item_ports) do
+    if port.entity and port.entity.valid and port.mode == "request" and item_port_requests_key(port, key) then
+      local inventory = get_main_inventory(port.entity)
+      if inventory then
+        requesters[#requesters + 1] = {
+          port = port,
+          inventory = inventory,
+          unit_number = port.entity.unit_number,
+          name = name,
+          quality = quality,
+          current = sync_materialized_item_count(port, key),
+          capacity = target_count_for_request{name = name, quality = quality},
+          assigned = 0
+        }
+      end
+    end
+  end
+  table.sort(requesters, request_sort_less)
+  return requesters
+end
+
+local function calculate_rebalance_allocations(total, requesters, key)
+  local allocation_requests = {}
+  for index, requester in ipairs(requesters) do
+    allocation_requests[index] = {
+      unit_number = requester.unit_number,
+      missing = requester.capacity,
+      assigned = 0
+    }
+  end
+
+  distribute_item_amount(total, allocation_requests, key)
+
+  local allocations = {}
+  for index, requester in ipairs(requesters) do
+    allocations[requester.unit_number] = allocation_requests[index].assigned
+  end
+  return allocations
+end
+
+local function rebalance_item_request_key(key)
+  local requesters = collect_item_rebalance_requesters(key)
+  if #requesters < 2 then return end
+
+  local total = storage.dimensional_storage.items[key] or 0
+  for _, requester in ipairs(requesters) do
+    total = total + requester.current
+  end
+
+  local allocations = calculate_rebalance_allocations(total, requesters, key)
+
+  for _, requester in ipairs(requesters) do
+    local desired = allocations[requester.unit_number] or 0
+    if requester.current > desired then
+      local excess = requester.current - desired
+      local removed = requester.inventory.remove(stack_definition(requester.name, requester.quality, excess))
+      if removed > 0 then
+        add_item_to_storage(requester.name, requester.quality, removed)
+        requester.current = requester.current - removed
+        requester.port.materialized[key] = requester.current > 0 and requester.current or nil
+      end
+    end
+  end
+
+  for _, requester in ipairs(requesters) do
+    local desired = allocations[requester.unit_number] or 0
+    if requester.current < desired then
+      local needed = desired - requester.current
+      local removed = remove_item_from_storage(requester.name, requester.quality, needed)
+      if removed > 0 then
+        local inserted = requester.inventory.insert(stack_definition(requester.name, requester.quality, removed))
+        if inserted > 0 then
+          requester.current = requester.current + inserted
+          requester.port.materialized[key] = (requester.port.materialized[key] or 0) + inserted
+        end
+        if inserted < removed then
+          add_item_to_storage(requester.name, requester.quality, removed - inserted)
+        end
+      end
+    end
+  end
+end
+
+rebalance_item_request_keys = function(keys)
+  for key in pairs(keys or {}) do
+    rebalance_item_request_key(key)
   end
 end
 
@@ -1096,6 +1246,7 @@ end
 
 local function set_item_port_mode(port, mode)
   if port.mode == mode then return end
+  local affected_keys = port.mode == "request" and item_port_request_keys(port) or {}
   absorb_inventory_to_storage(port.entity)
   port.mode = mode
   if mode == "supply" then
@@ -1106,6 +1257,9 @@ local function set_item_port_mode(port, mode)
     port.materialized = port.materialized or {}
   end
   apply_request_filters(port)
+  if mode == "supply" then
+    rebalance_item_request_keys(affected_keys)
+  end
 end
 
 local function set_fluid_port_mode(port, mode)
@@ -1137,11 +1291,19 @@ local function normalize_item_request(selection)
   return nil, nil
 end
 
-local function set_item_request(port, index, selection)
+local function set_item_request(port, index, selection, affected_keys)
+  local run_rebalance = affected_keys == nil
+  affected_keys = affected_keys or {}
   port.materialized = port.materialized or {}
   local old = port.requests[index]
+  local old_key = old and item_key(old.name, old.quality) or nil
+  local name, quality = normalize_item_request(selection)
+  local new_key = name and item_key(name, quality) or nil
+
+  if old_key == new_key then return end
+
   if old then
-    local old_key = item_key(old.name, old.quality)
+    affected_keys[old_key] = true
     if item_request_is_available(old) then
       local inventory = get_main_inventory(port.entity)
       if inventory then
@@ -1156,19 +1318,26 @@ local function set_item_request(port, index, selection)
     end
     port.materialized[old_key] = nil
   end
-  local name, quality = normalize_item_request(selection)
+
   if name then
     for other_index = 1, MAX_ITEM_REQUESTS do
       local request = port.requests[other_index]
       if other_index ~= index and item_request_is_available(request) and request.name == name and quality_name(request.quality) == quality_name(quality) then
-        set_item_request(port, other_index, nil)
+        set_item_request(port, other_index, nil, affected_keys)
       end
     end
     port.requests[index] = {name = name, quality = quality}
+    affected_keys[new_key] = true
   else
     port.requests[index] = nil
   end
   apply_request_filters(port)
+
+  if run_rebalance then
+    for key in pairs(affected_keys) do
+      rebalance_item_request_key(key)
+    end
+  end
 end
 
 script.on_init(function()

@@ -240,6 +240,14 @@ MODはRequest Portごとに、Dimensional Storageから実体化して内部Inve
 
 この記録はDimensional Storageそのものではなく、Port内部Inventoryに実体化している数量を追跡するための補助stateである。
 
+Request Port内部の実体化済みアイテムは、そのPortが恒久的に所有する在庫ではなく、Dimensional Storageから一時的に通常空間へ実体化された共有キャッシュとして扱う。
+
+実体化済みアイテムは、Portからインサータ、ローダー、プレイヤー等によって外部へ取り出されるまでは、同一アイテムおよび品質を要求する他のRequest Portへ再配分可能とする。
+
+再配分対象として扱う数量は、Port内部Inventory内の全数量ではなく、`materialized` stateに記録され、かつ実Inventory内に存在している数量に限る。
+
+外部から混入したアイテムを、共有キャッシュとして勝手に再配分してはならない。
+
 ---
 
 ### 6.2 補充周期
@@ -327,6 +335,16 @@ Entityの処理順によって、先に処理されたPortだけが在庫を取�
 割り切れない余りは、同一アイテムおよび品質ごとに次回以降の配分開始位置をずらしながら配分する。
 
 流体については、不足量を上限として可能な限り直接均等に配分する。
+
+同一アイテムおよび品質を要求するRequest Portの集合が変化した場合、既に各Request Portへ実体化されている共有キャッシュも含めて、必要に応じて公平に再平衡する。
+
+再平衡では、Dimensional Storage内数量と各Request Portの`materialized`数量を共有可能総量として扱い、各Request Portの5スタック上限を超えない範囲で望ましい割当量を計算する。
+
+割当量を超えて保持しているPortからは、超過分のみをInventoryから回収してDimensional Storageへ返却し、その後、不足しているPortへDimensional Storageから実体化する。
+
+再平衡は必ず回収と再実体化の二段階で行い、Port間で直接Inventoryを移動しない。
+
+通常の30 tick補充処理ごとに既存の`materialized`在庫を再平衡してはならない。
 
 ---
 
