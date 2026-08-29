@@ -25,8 +25,8 @@ local function fluid_port_overlay_sprite()
     priority = "extra-high",
     width = 128,
     height = 128,
-    shift = util.by_pixel(0, -8),
-    scale = 0.5
+    shift = util.by_pixel(0, 8),
+    scale = 0.28
   }
 end
 
@@ -36,9 +36,9 @@ local function fluid_port_shadow_sprite()
     priority = "extra-high",
     width = 128,
     height = 128,
-    shift = util.by_pixel(0, -8),
+    shift = util.by_pixel(2, 6),
     draw_as_shadow = true,
-    scale = 0.5
+    scale = 0.42
   }
 end
 
@@ -109,17 +109,17 @@ item_port.picture = {
       priority = "extra-high",
       width = 128,
       height = 128,
-      shift = util.by_pixel(0, -8),
+      shift = util.by_pixel(2, 6),
       draw_as_shadow = true,
-      scale = 0.5
+      scale = 0.42
     },
     {
       filename = item_port_picture,
       priority = "extra-high",
       width = 128,
       height = 128,
-      shift = util.by_pixel(0, -8),
-      scale = 0.5
+      shift = util.by_pixel(0, 8),
+      scale = 0.28
     }
   }
 }
