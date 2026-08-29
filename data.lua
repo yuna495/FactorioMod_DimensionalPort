@@ -21,6 +21,7 @@ item_port.icons = {
   {icon = "__base__/graphics/icons/steel-chest.png", tint = {r = 1, g = 0.25, b = 0.25, a = 1}}
 }
 item_port.icon = nil
+item_port.inventory_type = "with_filters_and_bar"
 item_port.circuit_connector = nil
 item_port.circuit_wire_max_distance = nil
 tint_sprite(item_port.picture, {r = 1, g = 0.25, b = 0.25, a = 1})

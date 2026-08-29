@@ -224,6 +224,12 @@ Requestモードの内部Inventoryは、Dimensional Storageから実体化され
 
 要求対象外のアイテムによって内部Inventoryが占有され、各要求アイテムの5スタック維持が妨げられる状態を許可しない。
 
+初期実装では、FactorioのContainer Prototypeで利用可能なfilter付きInventoryを使用し、Requestモード時は要求アイテムおよび品質に対応するslot filterを設定する。
+
+Factorioの通常Container Inventoryで「外部からの投入だけを完全禁止し、取り出しは許可する」ことをPrototype設定のみで完全保証できない場合、slot filterおよび定期更新時の混入検出・Dimensional Storage返却によって、要求対象外アイテムまたはmaterialized数を超える投入分がバッファを占有し続けないようにする。
+
+この場合も、外部から混入した物資を消滅させず、Dimensional Storageへ返却することを優先する。
+
 MODはRequest Portごとに、Dimensional Storageから実体化して内部Inventoryへ供給したアイテム数量を、アイテムおよび品質ごとに永続stateとして記録する。
 
 この記録は、Request Port内部に存在する物資がDimensional Storage由来であるかを判定し、Request設定変更、モード変更、Port撤去・破壊、外部からの混入検出時に物資総量保存則を維持するために使用する。
@@ -523,9 +529,11 @@ Requestモードの場合のみ表示する。
 
 要求アイテム指定には、要求チェストの物流要求スロットに近い、Factorio 2.xの品質対応選択GUIを使用する。
 
-初期実装では、品質を含むアイテム信号を選択し、アイテムと品質を一つの選択GUIから指定する。
+初期実装では、Factorio Runtime APIの `choose-elem-button` に `elem_type = "item-with-quality"` を使用し、アイテムと品質を一つの選択GUIから指定する。
 
-選択結果は、既存のRequestデータ構造である `{name, quality}` として保存する。
+選択結果は `PrototypeWithQuality` の `{name, quality}` として取得し、既存のRequestデータ構造である `{name, quality}` として保存する。
+
+要求アイテム選択には `elem_type = "signal"` を使用しない。Virtual Signal、Fluid Signal等を要求アイテムとして選択対象に含めない。
 
 Normal品質も選択可能とする。
 
@@ -555,11 +563,25 @@ Item PortのGUIでは、すべてのRequest Portが保持している実体化�
 
 GUIを開いている間、Dimensional Storage一覧は基本更新周期である30 tickごとに最新の数量へ更新する。
 
+30 tickごとの通常更新では、表示対象のアイテム・品質・流体の構成が変わっていない場合、既存GUI要素の数量およびTooltipのみを更新する。
+
+GUI一覧の全再構築は、GUIを開いた直後、検索文字列が変化した場合、表示対象の構成が増減した場合、または検索結果に影響するローカライズ名が更新された場合に限定する。
+
 Factorioの物流ネットワーク在庫表示に近い形式を使用する。
 
 アイテムおよび流体の数量は、通常のFactorioアイコン表示に近い形で、アイコンタイルの右下に表示する。
 
 Dimensional Storage一覧は9列で表示し、表示領域を超える場合はスクロールによって全項目を確認できるようにする。
+
+Dimensional Storage一覧の表示順は、可能な限りFactorio本体のインベントリや製作画面に近い順序とする。
+
+アイテムは、Item Groupの`order`、Item Subgroupの`order`、Item Prototypeの`order`、Prototype名、Qualityのlevelの順にソートする。
+
+同一Item Prototypeの品質違いは隣接させ、Qualityのlevelが低いものから高いものへ並べる。
+
+流体も、Fluid Prototypeから取得できるgroup、subgroup、order、Prototype名に基づき、毎回安定した順序で表示する。
+
+ジャンル見出しは初回実装では表示しない。
 
 アイテム一覧のアイコンは、通常のFactorioアイテムアイコンと同様に、Uncommon以上の品質についてアイコン左下へ品質マークを表示する。
 
@@ -573,6 +595,8 @@ Normal品質では品質マークを表示しない。
 ```
 
 アイコンおよび数量表示にカーソルを合わせると、対象のアイテム名または流体名と数量をTooltipで確認できる。
+
+アイテムTooltipに表示する品質名は、Quality Prototypeの`localised_name`を使用し、プレイヤーの表示言語に従う。
 
 ---
 

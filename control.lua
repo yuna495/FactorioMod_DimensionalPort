@@ -8,6 +8,8 @@ local DEFAULT_MODE = "supply"
 local NORMAL_QUALITY = "normal"
 local TRANSLATION_KIND_ITEM = "item"
 local TRANSLATION_KIND_FLUID = "fluid"
+local STORAGE_ENTRY_PREFIX = "dimensional_port_storage_entry_"
+local STORAGE_SIGNATURE_SEPARATOR = "\31"
 
 local function ensure_storage()
   storage.dimensional_storage = storage.dimensional_storage or {items = {}, fluids = {}}
@@ -173,23 +175,32 @@ local function target_count_for_request(request)
   return prototype.stack_size * REQUEST_STACKS
 end
 
+local function normalise_item_port_state(port, entity)
+  port = port or {}
+  port.entity = entity
+  port.mode = port.mode or DEFAULT_MODE
+  port.requests = port.requests or {}
+  port.materialized = port.materialized or {}
+  return port
+end
+
+local function normalise_fluid_port_state(port, entity)
+  port = port or {}
+  port.entity = entity
+  port.mode = port.mode or DEFAULT_MODE
+  return port
+end
+
 local function register_item_port(entity)
   if not (entity and entity.valid) then return end
-  storage.item_ports[entity.unit_number] = {
-    entity = entity,
-    mode = DEFAULT_MODE,
-    requests = {},
-    materialized = {}
-  }
+  local port = normalise_item_port_state(storage.item_ports[entity.unit_number], entity)
+  storage.item_ports[entity.unit_number] = port
+  apply_request_filters(port)
 end
 
 local function register_fluid_port(entity)
   if not (entity and entity.valid) then return end
-  storage.fluid_ports[entity.unit_number] = {
-    entity = entity,
-    mode = DEFAULT_MODE,
-    request = nil
-  }
+  storage.fluid_ports[entity.unit_number] = normalise_fluid_port_state(storage.fluid_ports[entity.unit_number], entity)
 end
 
 local function unregister_item_port(entity)
@@ -217,16 +228,24 @@ local function unregister_fluid_port(entity)
 end
 
 local function rebuild_ports()
-  storage.item_ports = {}
-  storage.fluid_ports = {}
+  local previous_item_ports = storage.item_ports or {}
+  local previous_fluid_ports = storage.fluid_ports or {}
+  local rebuilt_item_ports = {}
+  local rebuilt_fluid_ports = {}
+
   for _, surface in pairs(game.surfaces) do
     for _, entity in pairs(surface.find_entities_filtered{name = names.item_port_entity}) do
-      register_item_port(entity)
+      local port = normalise_item_port_state(previous_item_ports[entity.unit_number], entity)
+      rebuilt_item_ports[entity.unit_number] = port
+      apply_request_filters(port)
     end
     for _, entity in pairs(surface.find_entities_filtered{name = names.fluid_port_entity}) do
-      register_fluid_port(entity)
+      rebuilt_fluid_ports[entity.unit_number] = normalise_fluid_port_state(previous_fluid_ports[entity.unit_number], entity)
     end
   end
+
+  storage.item_ports = rebuilt_item_ports
+  storage.fluid_ports = rebuilt_fluid_ports
 end
 
 local function on_entity_created(entity)
@@ -395,6 +414,9 @@ local function player_state(player_index)
   state.translations.items = state.translations.items or {}
   state.translations.fluids = state.translations.fluids or {}
   state.pending_translations = state.pending_translations or {}
+  state.storage_gui = state.storage_gui or {}
+  state.storage_gui.signature = state.storage_gui.signature or ""
+  state.storage_gui.dirty = state.storage_gui.dirty or false
   return state
 end
 
@@ -442,6 +464,9 @@ end
 local function destroy_gui(player)
   local root = player.gui.screen.dimensional_port_frame
   if root then root.destroy() end
+  if storage.players and storage.players[player.index] then
+    storage.players[player.index].storage_gui = {signature = "", dirty = true}
+  end
 end
 
 local function add_mode_buttons(parent, port)
@@ -468,9 +493,12 @@ local function add_item_requests(parent, port)
     local request = port.requests[index]
     request_table.add{
       type = "choose-elem-button",
-      elem_type = "signal",
+      elem_type = "item-with-quality",
       style = "slot_button",
-      signal = request and {type = "item", name = request.name, quality = quality_name(request.quality)} or nil,
+      ["item-with-quality"] = request and {
+        name = request.name,
+        quality = quality_name(request.quality)
+      } or nil,
       tags = {action = "item-request", index = index}
     }
   end
@@ -505,8 +533,127 @@ local function displayed_item_counts()
   return counts
 end
 
-local function add_storage_table(parent, player, search)
+local function safe_property(object, property)
+  if not object then return nil end
+  local ok, value = pcall(function() return object[property] end)
+  if ok then return value end
+  return nil
+end
+
+local function prototype_sort_parts(prototype)
+  local subgroup = safe_property(prototype, "subgroup")
+  local group = safe_property(prototype, "group") or safe_property(subgroup, "group")
+  return {
+    safe_property(group, "order") or "",
+    safe_property(subgroup, "order") or "",
+    safe_property(prototype, "order") or "",
+    safe_property(prototype, "name") or ""
+  }
+end
+
+local function quality_level(quality)
+  local quality_prototype = prototypes.quality and prototypes.quality[quality_name(quality)]
+  return (quality_prototype and quality_prototype.level) or 0
+end
+
+local function quality_localised_name(quality)
+  local name = quality_name(quality)
+  local quality_prototype = prototypes.quality and prototypes.quality[name]
+  return (quality_prototype and quality_prototype.localised_name) or name
+end
+
+local function storage_entry_element_name(index)
+  return STORAGE_ENTRY_PREFIX .. index
+end
+
+local function storage_entry_signature(entries)
+  local parts = {}
+  for index, entry in ipairs(entries) do
+    parts[index] = entry.kind .. ":" .. entry.key
+  end
+  return table.concat(parts, STORAGE_SIGNATURE_SEPARATOR)
+end
+
+local function storage_entry_less(left, right)
+  for index = 1, #left.sort_parts do
+    if left.sort_parts[index] ~= right.sort_parts[index] then
+      return left.sort_parts[index] < right.sort_parts[index]
+    end
+  end
+  if left.kind ~= right.kind then return left.kind < right.kind end
+  if left.quality_level ~= right.quality_level then return left.quality_level < right.quality_level end
+  return left.key < right.key
+end
+
+local function collect_storage_entries(player, search)
   local state = player_state(player.index)
+  local entries = {}
+
+  for key, count in pairs(displayed_item_counts()) do
+    if count > 0 then
+      local name, quality = split_item_key(key)
+      local prototype = prototypes.item[name]
+      local local_name = prototype and prototype.localised_name or name
+      local normalised_quality = quality_name(quality)
+      request_localised_name(player, TRANSLATION_KIND_ITEM, name, local_name)
+      if matches_search(state, TRANSLATION_KIND_ITEM, name, normalised_quality, search) then
+        entries[#entries + 1] = {
+          kind = "item",
+          key = key,
+          name = name,
+          quality = normalised_quality,
+          amount = count,
+          sprite = "item/" .. name,
+          tooltip = {"dimensional-port.item-tooltip", local_name, quality_localised_name(normalised_quality), count},
+          sort_parts = prototype_sort_parts(prototype),
+          quality_level = quality_level(normalised_quality)
+        }
+      end
+    end
+  end
+
+  for name, amount in pairs(storage.dimensional_storage.fluids) do
+    if amount > 0 then
+      local prototype = prototypes.fluid[name]
+      local local_name = prototype and prototype.localised_name or name
+      request_localised_name(player, TRANSLATION_KIND_FLUID, name, local_name)
+      if matches_search(state, TRANSLATION_KIND_FLUID, name, nil, search) then
+        entries[#entries + 1] = {
+          kind = "fluid",
+          key = fluid_key(name),
+          name = name,
+          amount = amount,
+          sprite = "fluid/" .. name,
+          tooltip = {"dimensional-port.fluid-tooltip", local_name, amount},
+          sort_parts = prototype_sort_parts(prototype),
+          quality_level = 0
+        }
+      end
+    end
+  end
+
+  table.sort(entries, storage_entry_less)
+  return entries
+end
+
+local function add_storage_entry(parent, entry, index)
+  local icon = parent.add{
+    type = "sprite-button",
+    name = storage_entry_element_name(index),
+    sprite = entry.sprite,
+    number = entry.amount,
+    tooltip = entry.tooltip,
+    style = "slot_button"
+  }
+  if entry.kind == "item" and entry.quality ~= NORMAL_QUALITY then
+    icon.quality = entry.quality
+  end
+end
+
+local function rebuild_storage_table(parent, player, entries, signature)
+  local old_scroll = parent.dimensional_port_storage_scroll
+  if old_scroll then old_scroll.destroy() end
+
   local scroll_pane = parent.add{
     type = "scroll-pane",
     name = "dimensional_port_storage_scroll",
@@ -519,37 +666,54 @@ local function add_storage_table(parent, player, search)
     name = "dimensional_port_storage_table",
     column_count = 9
   }
-  for key, count in pairs(displayed_item_counts()) do
-    local name, quality = split_item_key(key)
-    local prototype = prototypes.item[name]
-    local local_name = prototype and prototype.localised_name or name
-    request_localised_name(player, TRANSLATION_KIND_ITEM, name, local_name)
-    if count > 0 and matches_search(state, TRANSLATION_KIND_ITEM, name, quality, search) then
-      local tooltip = {"dimensional-port.item-tooltip", local_name, quality, count}
-      local icon = table_element.add{
-        type = "sprite-button",
-        sprite = "item/" .. name,
-        number = count,
-        tooltip = tooltip
-      }
-      if quality_name(quality) ~= NORMAL_QUALITY then
-        icon.quality = quality_name(quality)
-      end
-    end
+
+  for index, entry in ipairs(entries) do
+    add_storage_entry(table_element, entry, index)
   end
-  for name, amount in pairs(storage.dimensional_storage.fluids) do
-    local prototype = prototypes.fluid[name]
-    local local_name = prototype and prototype.localised_name or name
-    request_localised_name(player, TRANSLATION_KIND_FLUID, name, local_name)
-    if amount > 0 and matches_search(state, TRANSLATION_KIND_FLUID, name, nil, search) then
-      local tooltip = {"dimensional-port.fluid-tooltip", local_name, amount}
-      table_element.add{
-        type = "sprite-button",
-        sprite = "fluid/" .. name,
-        number = amount,
-        tooltip = tooltip
-      }
-    end
+
+  local state = player_state(player.index)
+  state.storage_gui.signature = signature
+  state.storage_gui.dirty = false
+end
+
+local function update_storage_table(parent, entries)
+  local scroll_pane = parent.dimensional_port_storage_scroll
+  local table_element = scroll_pane and scroll_pane.dimensional_port_storage_table
+  if not table_element then return false end
+
+  for index, entry in ipairs(entries) do
+    local icon = table_element[storage_entry_element_name(index)]
+    if not icon then return false end
+    icon.number = entry.amount
+    icon.tooltip = entry.tooltip
+  end
+
+  return true
+end
+
+local function add_storage_table(parent, player, search)
+  local entries = collect_storage_entries(player, search)
+  rebuild_storage_table(parent, player, entries, storage_entry_signature(entries))
+end
+
+local function refresh_storage_list(player, force_rebuild)
+  local frame = player.gui.screen.dimensional_port_frame
+  if not frame then return end
+  local storage_frame = frame.dimensional_port_storage_frame
+  if not storage_frame then return end
+  local state = player_state(player.index)
+  local entries = collect_storage_entries(player, state.search)
+  local signature = storage_entry_signature(entries)
+
+  if force_rebuild or state.storage_gui.dirty or state.storage_gui.signature ~= signature then
+    rebuild_storage_table(storage_frame, player, entries, signature)
+    return
+  end
+
+  if not update_storage_table(storage_frame, entries) then
+    rebuild_storage_table(storage_frame, player, entries, signature)
+  else
+    state.storage_gui.dirty = false
   end
 end
 
@@ -586,23 +750,13 @@ local function add_storage_list(parent, player, search)
   add_storage_table(storage_frame, player, search)
 end
 
-local function refresh_storage_list(player)
-  local frame = player.gui.screen.dimensional_port_frame
-  if not frame then return end
-  local storage_frame = frame.dimensional_port_storage_frame
-  if not storage_frame then return end
-  local old_scroll = storage_frame.dimensional_port_storage_scroll
-  if old_scroll then old_scroll.destroy() end
-  local state = player_state(player.index)
-  add_storage_table(storage_frame, player, state.search)
-end
-
 local function build_gui(player, port, port_type)
   destroy_gui(player)
   local state = player_state(player.index)
   state.port_type = port_type
   state.unit_number = port.entity.unit_number
   state.search = state.search or ""
+  state.storage_gui = {signature = "", dirty = true}
 
   local frame = player.gui.screen.add{
     type = "frame",
@@ -677,9 +831,9 @@ local function set_fluid_port_mode(port, mode)
 end
 
 local function normalize_item_request(selection)
-  if type(selection) == "table" and selection.name and (selection.type == nil or selection.type == "item") then
+  if type(selection) == "table" and selection.name and (selection.type == nil or selection.type == "item") and prototypes.item[selection.name] then
     return selection.name, quality_name(selection.quality)
-  elseif type(selection) == "string" then
+  elseif type(selection) == "string" and prototypes.item[selection] then
     return selection, NORMAL_QUALITY
   end
   return nil, nil
@@ -800,7 +954,7 @@ script.on_event(defines.events.on_gui_click, function(event)
     state.search = ""
     local search = element.parent and element.parent.valid and element.parent.dimensional_port_search
     if search then search.text = "" end
-    refresh_storage_list(player)
+    refresh_storage_list(player, true)
   end
 end)
 
@@ -830,7 +984,7 @@ script.on_event(defines.events.on_gui_text_changed, function(event)
   if not player then return end
   local state = player_state(player.index)
   state.search = element.text
-  refresh_storage_list(player)
+  refresh_storage_list(player, true)
 end)
 
 script.on_event(defines.events.on_string_translated, function(event)
@@ -843,7 +997,9 @@ script.on_event(defines.events.on_string_translated, function(event)
   state.pending_translations[event.id] = nil
   if event.translated then
     translation_cache_for(state, pending.kind)[pending.name] = string.lower(event.result or "")
-    refresh_storage_list(player)
+    if state.search ~= "" then
+      state.storage_gui.dirty = true
+    end
   end
 end)
 
@@ -853,5 +1009,7 @@ script.on_event(defines.events.on_player_locale_changed, function(event)
   state.translations = {items = {}, fluids = {}}
   state.pending_translations = {}
   local player = game.get_player(event.player_index)
-  if player then refresh_storage_list(player) end
+  if player then
+    state.storage_gui = {signature = "", dirty = true}
+  end
 end)
