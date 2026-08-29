@@ -365,13 +365,28 @@ local function rebuild_ports()
   storage.fluid_ports = rebuilt_fluid_ports
 end
 
+local function draw_vortex(entity)
+  rendering.draw_animation{
+    animation = "dimensional-port-vortex",
+    target = {
+      entity = entity,
+      offset = {0, -0.37}
+    },
+    surface = entity.surface,
+    x_scale = 0.14,
+    y_scale = 0.15
+  }
+end
+
 local function on_entity_created(entity)
   ensure_storage()
   if not (entity and entity.valid) then return end
   if entity.name == names.item_port_entity then
     register_item_port(entity)
+    draw_vortex(entity)
   elseif entity.name == names.fluid_port_entity then
     register_fluid_port(entity)
+    draw_vortex(entity)
   end
 end
 

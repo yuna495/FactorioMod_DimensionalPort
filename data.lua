@@ -2,31 +2,20 @@ local names = require("prototypes.names")
 
 local item_port_icon = "__DimensionalPort__/graphics/icons/dimensional-item-port.png"
 local fluid_port_icon = "__DimensionalPort__/graphics/icons/dimensional-fluid-port.png"
-local item_port_picture = "__DimensionalPort__/graphics/entity/dimensional-item-port/dimensional-item-port.png"
-local item_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-item-port/dimensional-item-port-shadow.png"
-local fluid_port_overlay = "__DimensionalPort__/graphics/entity/dimensional-fluid-port/dimensional-fluid-port-overlay.png"
-local fluid_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-fluid-port/dimensional-fluid-port-shadow.png"
+local item_port_picture = "__DimensionalPort__/graphics/entity/dimensional-port.png"
+local item_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-port-shadow.png"
+local fluid_port_overlay = "__DimensionalPort__/graphics/entity/dimensional-fluid-port.png"
+local fluid_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-port-shadow.png"
 
-local function tint_sprite(sprite, tint)
-  if type(sprite) ~= "table" then return end
-  if sprite.filename and not sprite.draw_as_shadow then
-    sprite.tint = tint
-  end
-  for _, value in pairs(sprite) do
-    if type(value) == "table" then
-      tint_sprite(value, tint)
-    end
-  end
-end
 
 local function fluid_port_overlay_sprite()
   return {
     filename = fluid_port_overlay,
     priority = "extra-high",
     width = 128,
-    height = 128,
-    shift = util.by_pixel(0, 8),
-    scale = 0.28
+    height = 135,
+    shift = util.by_pixel(0, -2),
+    scale = 0.3
   }
 end
 
@@ -34,60 +23,12 @@ local function fluid_port_shadow_sprite()
   return {
     filename = fluid_port_shadow,
     priority = "extra-high",
-    width = 128,
-    height = 128,
-    shift = util.by_pixel(2, 6),
+    width = 110,
+    height = 50,
+    shift = util.by_pixel(16, 6),
     draw_as_shadow = true,
-    scale = 0.42
+    scale = 0.55
   }
-end
-
-local function overlay_pipe_sprite(sprite)
-  if type(sprite) ~= "table" then return sprite end
-
-  local copy = table.deepcopy(sprite)
-  if copy.layers then
-    copy.layers[#copy.layers + 1] = fluid_port_shadow_sprite()
-    copy.layers[#copy.layers + 1] = fluid_port_overlay_sprite()
-    return copy
-  end
-
-  return {
-    layers = {
-      copy,
-      fluid_port_shadow_sprite(),
-      fluid_port_overlay_sprite()
-    }
-  }
-end
-
-local function overlay_pipe_pictures(pictures)
-  local keys = {
-    "straight_vertical_single",
-    "straight_vertical",
-    "straight_vertical_window",
-    "straight_horizontal_window",
-    "straight_horizontal",
-    "corner_up_right",
-    "corner_up_left",
-    "corner_down_right",
-    "corner_down_left",
-    "t_up",
-    "t_down",
-    "t_right",
-    "t_left",
-    "cross",
-    "ending_up",
-    "ending_down",
-    "ending_right",
-    "ending_left"
-  }
-
-  for _, key in ipairs(keys) do
-    if pictures[key] then
-      pictures[key] = overlay_pipe_sprite(pictures[key])
-    end
-  end
 end
 
 local item_port = table.deepcopy(data.raw.container["steel-chest"])
@@ -107,19 +48,19 @@ item_port.picture = {
     {
       filename = item_port_shadow,
       priority = "extra-high",
-      width = 128,
-      height = 128,
-      shift = util.by_pixel(2, 6),
+      width = 110,
+      height = 50,
+      shift = util.by_pixel(16, 6),
       draw_as_shadow = true,
-      scale = 0.42
+      scale = 0.55
     },
     {
       filename = item_port_picture,
       priority = "extra-high",
       width = 128,
-      height = 128,
-      shift = util.by_pixel(0, 8),
-      scale = 0.28
+      height = 135,
+      shift = util.by_pixel(0, -2),
+      scale = 0.3
     }
   }
 }
@@ -134,8 +75,40 @@ fluid_port.icons = {
 }
 fluid_port.icon = nil
 fluid_port.fluid_box.volume = 25000
-tint_sprite(fluid_port.pictures, {r = 1, g = 0.25, b = 0.25, a = 1})
-overlay_pipe_pictures(fluid_port.pictures)
+
+local function fluid_port_picture()
+  return {
+    layers = {
+      fluid_port_shadow_sprite(),
+      fluid_port_overlay_sprite()
+    }
+  }
+end
+
+fluid_port.pictures = {
+  straight_vertical_single = fluid_port_picture(),
+  straight_vertical = fluid_port_picture(),
+  straight_vertical_window = fluid_port_picture(),
+  straight_horizontal_window = fluid_port_picture(),
+  straight_horizontal = fluid_port_picture(),
+
+  corner_up_right = fluid_port_picture(),
+  corner_up_left = fluid_port_picture(),
+  corner_down_right = fluid_port_picture(),
+  corner_down_left = fluid_port_picture(),
+
+  t_up = fluid_port_picture(),
+  t_down = fluid_port_picture(),
+  t_right = fluid_port_picture(),
+  t_left = fluid_port_picture(),
+
+  cross = fluid_port_picture(),
+
+  ending_up = fluid_port_picture(),
+  ending_down = fluid_port_picture(),
+  ending_right = fluid_port_picture(),
+  ending_left = fluid_port_picture()
+}
 
 local item_port_item = table.deepcopy(data.raw.item["steel-chest"])
 item_port_item.name = names.item_port_item
@@ -173,5 +146,20 @@ data:extend({
     enabled = true,
     ingredients = {{type = "item", name = "iron-plate", amount = 5}},
     results = {{type = "item", name = names.fluid_port_item, amount = 1}}
+  }
+})
+data:extend({
+  {
+    type = "animation",
+    name = "dimensional-port-vortex",
+    filename = "__DimensionalPort__/graphics/entity/vortex.png",
+
+    width = 128,
+    height = 128,
+
+    frame_count = 14,
+    line_length = 4,
+
+    animation_speed = 0.15
   }
 })
