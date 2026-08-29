@@ -468,8 +468,9 @@ local function add_item_requests(parent, port)
     local request = port.requests[index]
     request_table.add{
       type = "choose-elem-button",
-      elem_type = "item-with-quality",
-      ["item-with-quality"] = request and {name = request.name, quality = quality_name(request.quality)} or nil,
+      elem_type = "signal",
+      style = "slot_button",
+      signal = request and {type = "item", name = request.name, quality = quality_name(request.quality)} or nil,
       tags = {action = "item-request", index = index}
     }
   end
@@ -676,7 +677,7 @@ local function set_fluid_port_mode(port, mode)
 end
 
 local function normalize_item_request(selection)
-  if type(selection) == "table" and selection.name then
+  if type(selection) == "table" and selection.name and (selection.type == nil or selection.type == "item") then
     return selection.name, quality_name(selection.quality)
   elseif type(selection) == "string" then
     return selection, NORMAL_QUALITY
