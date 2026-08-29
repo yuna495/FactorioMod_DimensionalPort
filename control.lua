@@ -18,6 +18,10 @@ local function ensure_storage()
   storage.item_ports = storage.item_ports or {}
   storage.fluid_ports = storage.fluid_ports or {}
   storage.players = storage.players or {}
+  storage.destroy_registrations = storage.destroy_registrations or {}
+  storage.distribution_offsets = storage.distribution_offsets or {items = {}, fluids = {}}
+  storage.distribution_offsets.items = storage.distribution_offsets.items or {}
+  storage.distribution_offsets.fluids = storage.distribution_offsets.fluids or {}
 end
 
 local function quality_name(quality)
@@ -38,6 +42,19 @@ end
 
 local function fluid_key(name)
   return name
+end
+
+local function quality_is_available(quality)
+  local name = quality_name(quality)
+  return prototypes.quality == nil or prototypes.quality[name] ~= nil
+end
+
+local function item_request_is_available(request)
+  return request and request.name and prototypes.item[request.name] and quality_is_available(request.quality)
+end
+
+local function fluid_is_available(name)
+  return name and prototypes.fluid[name] ~= nil
 end
 
 local function add_item_to_storage(name, quality, count)
@@ -111,11 +128,14 @@ local function apply_request_filters(port)
 
   if inventory.supports_filters and inventory.supports_filters() then
     local slot = 1
-    for _, request in ipairs(port.requests or {}) do
-      for _ = 1, REQUEST_STACKS do
-        if slot <= #inventory then
-          inventory.set_filter(slot, {name = request.name, quality = quality_name(request.quality)})
-          slot = slot + 1
+    for index = 1, MAX_ITEM_REQUESTS do
+      local request = port.requests and port.requests[index]
+      if item_request_is_available(request) then
+        for _ = 1, REQUEST_STACKS do
+          if slot <= #inventory then
+            inventory.set_filter(slot, {name = request.name, quality = quality_name(request.quality)})
+            slot = slot + 1
+          end
         end
       end
     end
@@ -138,8 +158,11 @@ local function return_unrequested_items(port)
   if not inventory then return end
   port.materialized = port.materialized or {}
   local requested = {}
-  for _, request in ipairs(port.requests or {}) do
-    requested[item_key(request.name, request.quality)] = true
+  for index = 1, MAX_ITEM_REQUESTS do
+    local request = port.requests and port.requests[index]
+    if item_request_is_available(request) then
+      requested[item_key(request.name, request.quality)] = true
+    end
   end
   local contents = inventory.get_contents()
   local actual_counts = {}
@@ -175,6 +198,17 @@ local function target_count_for_request(request)
   return prototype.stack_size * REQUEST_STACKS
 end
 
+local function normalise_fluid_materialized(materialized, request)
+  if type(materialized) == "table" then
+    materialized.amount = materialized.amount or 0
+    materialized.name = materialized.name or request
+    return materialized
+  elseif type(materialized) == "number" then
+    return {name = request, amount = materialized}
+  end
+  return {name = request, amount = 0}
+end
+
 local function normalise_item_port_state(port, entity)
   port = port or {}
   port.entity = entity
@@ -188,19 +222,59 @@ local function normalise_fluid_port_state(port, entity)
   port = port or {}
   port.entity = entity
   port.mode = port.mode or DEFAULT_MODE
+  port.materialized = normalise_fluid_materialized(port.materialized, port.request)
   return port
+end
+
+local function clear_destroy_registration(port)
+  if port and port.destroy_registration then
+    storage.destroy_registrations[port.destroy_registration] = nil
+    port.destroy_registration = nil
+  end
+end
+
+local function register_destroy_watch(port, entity, port_type)
+  if port.destroy_registration and storage.destroy_registrations[port.destroy_registration] then return end
+  port.destroy_registration = nil
+  local registration_number = script.register_on_object_destroyed(entity)
+  port.destroy_registration = registration_number
+  storage.destroy_registrations[registration_number] = {
+    port_type = port_type,
+    unit_number = entity.unit_number
+  }
+end
+
+local function return_materialized_items_to_storage(port)
+  for key, count in pairs(port.materialized or {}) do
+    if count and count > 0 then
+      local name, quality = split_item_key(key)
+      add_item_to_storage(name, quality, count)
+    end
+  end
+  port.materialized = {}
+end
+
+local function return_materialized_fluid_to_storage(port)
+  port.materialized = normalise_fluid_materialized(port.materialized, port.request)
+  if port.materialized.name and port.materialized.amount and port.materialized.amount > 0 then
+    add_fluid_to_storage(port.materialized.name, port.materialized.amount)
+  end
+  port.materialized = {name = port.request, amount = 0}
 end
 
 local function register_item_port(entity)
   if not (entity and entity.valid) then return end
   local port = normalise_item_port_state(storage.item_ports[entity.unit_number], entity)
   storage.item_ports[entity.unit_number] = port
+  register_destroy_watch(port, entity, "item")
   apply_request_filters(port)
 end
 
 local function register_fluid_port(entity)
   if not (entity and entity.valid) then return end
-  storage.fluid_ports[entity.unit_number] = normalise_fluid_port_state(storage.fluid_ports[entity.unit_number], entity)
+  local port = normalise_fluid_port_state(storage.fluid_ports[entity.unit_number], entity)
+  storage.fluid_ports[entity.unit_number] = port
+  register_destroy_watch(port, entity, "fluid")
 end
 
 local function unregister_item_port(entity)
@@ -210,6 +284,7 @@ local function unregister_item_port(entity)
   if port.mode == "request" then
     absorb_inventory_to_storage(entity)
   end
+  clear_destroy_registration(port)
   storage.item_ports[entity.unit_number] = nil
 end
 
@@ -224,7 +299,24 @@ local function unregister_fluid_port(entity)
       entity.fluidbox[1] = nil
     end
   end
+  clear_destroy_registration(port)
   storage.fluid_ports[entity.unit_number] = nil
+end
+
+local function unregister_lost_item_port(unit_number, port)
+  if port.mode == "request" then
+    return_materialized_items_to_storage(port)
+  end
+  clear_destroy_registration(port)
+  storage.item_ports[unit_number] = nil
+end
+
+local function unregister_lost_fluid_port(unit_number, port)
+  if port.mode == "request" then
+    return_materialized_fluid_to_storage(port)
+  end
+  clear_destroy_registration(port)
+  storage.fluid_ports[unit_number] = nil
 end
 
 local function rebuild_ports()
@@ -237,10 +329,24 @@ local function rebuild_ports()
     for _, entity in pairs(surface.find_entities_filtered{name = names.item_port_entity}) do
       local port = normalise_item_port_state(previous_item_ports[entity.unit_number], entity)
       rebuilt_item_ports[entity.unit_number] = port
+      register_destroy_watch(port, entity, "item")
       apply_request_filters(port)
     end
     for _, entity in pairs(surface.find_entities_filtered{name = names.fluid_port_entity}) do
-      rebuilt_fluid_ports[entity.unit_number] = normalise_fluid_port_state(previous_fluid_ports[entity.unit_number], entity)
+      local port = normalise_fluid_port_state(previous_fluid_ports[entity.unit_number], entity)
+      rebuilt_fluid_ports[entity.unit_number] = port
+      register_destroy_watch(port, entity, "fluid")
+    end
+  end
+
+  for unit_number, port in pairs(previous_item_ports) do
+    if not rebuilt_item_ports[unit_number] then
+      unregister_lost_item_port(unit_number, port)
+    end
+  end
+  for unit_number, port in pairs(previous_fluid_ports) do
+    if not rebuilt_fluid_ports[unit_number] then
+      unregister_lost_fluid_port(unit_number, port)
     end
   end
 
@@ -268,31 +374,145 @@ local function on_entity_removed(entity)
   end
 end
 
-local function distribute_amount(total, requests)
+local function clear_cloned_item_port_inventory(entity)
+  local inventory = get_main_inventory(entity)
+  if inventory then inventory.clear() end
+end
+
+local function clear_cloned_fluid_port_fluidbox(entity)
+  if entity and entity.valid and entity.fluidbox then
+    entity.fluidbox[1] = nil
+  end
+end
+
+local function on_entity_cloned(event)
+  ensure_storage()
+  local entity = event.destination
+  if not (entity and entity.valid) then return end
+  if entity.name == names.item_port_entity then
+    clear_cloned_item_port_inventory(entity)
+    register_item_port(entity)
+  elseif entity.name == names.fluid_port_entity then
+    clear_cloned_fluid_port_fluidbox(entity)
+    register_fluid_port(entity)
+  end
+end
+
+local function on_registered_object_destroyed(event)
+  ensure_storage()
+  local registration = storage.destroy_registrations[event.registration_number]
+  if not registration then return end
+  storage.destroy_registrations[event.registration_number] = nil
+
+  if registration.port_type == "item" then
+    local port = storage.item_ports[registration.unit_number]
+    if port then
+      if port.mode == "request" then
+        return_materialized_items_to_storage(port)
+      end
+      storage.item_ports[registration.unit_number] = nil
+    end
+  elseif registration.port_type == "fluid" then
+    local port = storage.fluid_ports[registration.unit_number]
+    if port then
+      if port.mode == "request" then
+        return_materialized_fluid_to_storage(port)
+      end
+      storage.fluid_ports[registration.unit_number] = nil
+    end
+  end
+end
+
+local function request_sort_less(left, right)
+  return (left.unit_number or 0) < (right.unit_number or 0)
+end
+
+local function active_requests(requests)
   local active = {}
   for _, request in ipairs(requests) do
-    if request.missing > 0 then
+    if request.missing - request.assigned > 0 then
       active[#active + 1] = request
     end
   end
-  local remaining = total
+  table.sort(active, request_sort_less)
+  return active
+end
+
+local function distribute_item_amount(total, requests, key)
+  local remaining = math.floor(total)
+  if remaining <= 0 then return end
+
+  local active = active_requests(requests)
+  if #active == 0 then return end
+
+  local initial_active_count = #active
+  local total_assigned = 0
+  local start = ((storage.distribution_offsets.items[key] or 0) % #active) + 1
+
   while remaining > 0 and #active > 0 do
-    local share = math.max(1, math.floor(remaining / #active))
+    local base_share = math.floor(remaining / #active)
+    local remainder = remaining % #active
+    local assigned_this_round = 0
     local next_active = {}
-    local changed = false
-    for _, request in ipairs(active) do
+
+    for step = 0, #active - 1 do
       if remaining <= 0 then break end
+      local request = active[((start + step - 1) % #active) + 1]
+      local share = base_share
+      if remainder > 0 then
+        share = share + 1
+        remainder = remainder - 1
+      end
+      if share <= 0 then share = 1 end
       local amount = math.min(request.missing - request.assigned, share, remaining)
       if amount > 0 then
         request.assigned = request.assigned + amount
         remaining = remaining - amount
-        changed = true
+        assigned_this_round = assigned_this_round + amount
+        total_assigned = total_assigned + amount
+      end
+    end
+
+    for _, request in ipairs(active) do
+      if request.assigned < request.missing then
+        next_active[#next_active + 1] = request
+      end
+    end
+    if assigned_this_round == 0 then break end
+    active = next_active
+    if #active > 0 then
+      start = ((start - 1) % #active) + 1
+    end
+  end
+
+  if total_assigned > 0 then
+    storage.distribution_offsets.items[key] = ((storage.distribution_offsets.items[key] or 0) + total_assigned) % initial_active_count
+  end
+end
+
+local function distribute_fluid_amount(total, requests)
+  local remaining = total
+  if remaining <= 0 then return end
+
+  local active = active_requests(requests)
+  while remaining > 0.000001 and #active > 0 do
+    local share = remaining / #active
+    local next_active = {}
+    local assigned_this_round = 0
+
+    for _, request in ipairs(active) do
+      local amount = math.min(request.missing - request.assigned, share)
+      if amount > 0 then
+        request.assigned = request.assigned + amount
+        remaining = remaining - amount
+        assigned_this_round = assigned_this_round + amount
       end
       if request.assigned < request.missing then
         next_active[#next_active + 1] = request
       end
     end
-    if not changed then break end
+
+    if assigned_this_round <= 0.000001 then break end
     active = next_active
   end
 end
@@ -300,7 +520,7 @@ end
 local function process_item_ports()
   for unit_number, port in pairs(storage.item_ports) do
     if not (port.entity and port.entity.valid) then
-      storage.item_ports[unit_number] = nil
+      unregister_lost_item_port(unit_number, port)
     elseif port.mode == "supply" then
       absorb_inventory_to_storage(port.entity)
     elseif port.mode == "request" then
@@ -313,20 +533,24 @@ local function process_item_ports()
     if port.entity and port.entity.valid and port.mode == "request" then
       local inventory = get_main_inventory(port.entity)
       if inventory then
-        for _, request in ipairs(port.requests or {}) do
-          local target = target_count_for_request(request)
-          local current = inventory_count(inventory, request.name, request.quality)
-          local missing = target - current
-          if missing > 0 then
-            local key = item_key(request.name, request.quality)
-            grouped[key] = grouped[key] or {}
-            grouped[key][#grouped[key] + 1] = {
-              port = port,
-              name = request.name,
-              quality = quality_name(request.quality),
-              missing = missing,
-              assigned = 0
-            }
+        for index = 1, MAX_ITEM_REQUESTS do
+          local request = port.requests and port.requests[index]
+          if item_request_is_available(request) then
+            local target = target_count_for_request(request)
+            local current = inventory_count(inventory, request.name, request.quality)
+            local missing = target - current
+            if missing > 0 then
+              local key = item_key(request.name, request.quality)
+              grouped[key] = grouped[key] or {}
+              grouped[key][#grouped[key] + 1] = {
+                port = port,
+                unit_number = port.entity.unit_number,
+                name = request.name,
+                quality = quality_name(request.quality),
+                missing = missing,
+                assigned = 0
+              }
+            end
           end
         end
       end
@@ -334,7 +558,7 @@ local function process_item_ports()
   end
 
   for key, requests in pairs(grouped) do
-    distribute_amount(storage.dimensional_storage.items[key] or 0, requests)
+    distribute_item_amount(storage.dimensional_storage.items[key] or 0, requests, key)
     for _, request in ipairs(requests) do
       if request.assigned > 0 then
         local inventory = get_main_inventory(request.port.entity)
@@ -355,22 +579,79 @@ local function process_item_ports()
   end
 end
 
+local function set_fluidbox_content(entity, name, amount)
+  if amount and amount > 0 then
+    entity.fluidbox[1] = {name = name, amount = amount}
+  else
+    entity.fluidbox[1] = nil
+  end
+end
+
+local function return_fluidbox_to_storage(port)
+  if not (port.entity and port.entity.valid and port.entity.fluidbox) then return false end
+  local fluid = port.entity.fluidbox[1]
+  if not (fluid and fluid.name and fluid.amount and fluid.amount > 0) then
+    port.materialized = normalise_fluid_materialized(port.materialized, port.request)
+    port.materialized.amount = 0
+    port.materialized.name = port.request
+    return true
+  end
+  if not fluid_is_temperature_safe(fluid) then return false end
+  add_fluid_to_storage(fluid.name, fluid.amount)
+  port.entity.fluidbox[1] = nil
+  port.materialized = {name = port.request, amount = 0}
+  return true
+end
+
+local function return_unrequested_fluid(port)
+  if not (port.entity and port.entity.valid and port.entity.fluidbox) then return end
+  port.materialized = normalise_fluid_materialized(port.materialized, port.request)
+  local fluid = port.entity.fluidbox[1]
+  if not (fluid and fluid.name and fluid.amount and fluid.amount > 0) then
+    port.materialized.amount = 0
+    port.materialized.name = port.request
+    return
+  end
+  if not fluid_is_temperature_safe(fluid) then return end
+
+  if port.mode ~= "request" or fluid.name ~= port.request then
+    add_fluid_to_storage(fluid.name, fluid.amount)
+    port.entity.fluidbox[1] = nil
+    port.materialized = {name = port.request, amount = 0}
+    return
+  end
+
+  if port.materialized.name ~= fluid.name then
+    port.materialized = {name = fluid.name, amount = 0}
+  end
+
+  if fluid.amount > port.materialized.amount then
+    local excess = fluid.amount - port.materialized.amount
+    add_fluid_to_storage(fluid.name, excess)
+    set_fluidbox_content(port.entity, fluid.name, port.materialized.amount)
+  elseif fluid.amount < port.materialized.amount then
+    port.materialized.amount = fluid.amount
+  end
+end
+
 local function process_fluid_ports()
   for unit_number, port in pairs(storage.fluid_ports) do
     if not (port.entity and port.entity.valid) then
-      storage.fluid_ports[unit_number] = nil
+      unregister_lost_fluid_port(unit_number, port)
     elseif port.mode == "supply" then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
       if fluid_is_temperature_safe(fluid) then
         add_fluid_to_storage(fluid.name, fluid.amount)
         port.entity.fluidbox[1] = nil
       end
+    elseif port.mode == "request" then
+      return_unrequested_fluid(port)
     end
   end
 
   local grouped = {}
   for _, port in pairs(storage.fluid_ports) do
-    if port.entity and port.entity.valid and port.mode == "request" and port.request then
+    if port.entity and port.entity.valid and port.mode == "request" and fluid_is_available(port.request) then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
       local current = 0
       if fluid and fluid.name == port.request and fluid_is_temperature_safe(fluid) then
@@ -384,6 +665,7 @@ local function process_fluid_ports()
         grouped[key] = grouped[key] or {}
         grouped[key][#grouped[key] + 1] = {
           port = port,
+          unit_number = port.entity.unit_number,
           name = port.request,
           missing = missing,
           assigned = 0
@@ -393,11 +675,16 @@ local function process_fluid_ports()
   end
 
   for key, requests in pairs(grouped) do
-    distribute_amount(storage.dimensional_storage.fluids[key] or 0, requests)
+    distribute_fluid_amount(storage.dimensional_storage.fluids[key] or 0, requests)
     for _, request in ipairs(requests) do
       if request.assigned > 0 then
         local removed = remove_fluid_from_storage(request.name, request.assigned)
         local inserted = request.port.entity.insert_fluid{name = request.name, amount = removed}
+        if inserted > 0 then
+          request.port.materialized = normalise_fluid_materialized(request.port.materialized, request.name)
+          request.port.materialized.name = request.name
+          request.port.materialized.amount = request.port.materialized.amount + inserted
+        end
         if inserted < removed then
           add_fluid_to_storage(request.name, removed - inserted)
         end
@@ -490,7 +777,7 @@ local function add_item_requests(parent, port)
   local request_frame = parent.add{type = "frame", direction = "vertical", caption = {"dimensional-port.request-items"}}
   local request_table = request_frame.add{type = "table", column_count = 9}
   for index = 1, MAX_ITEM_REQUESTS do
-    local request = port.requests[index]
+    local request = item_request_is_available(port.requests[index]) and port.requests[index] or nil
     request_table.add{
       type = "choose-elem-button",
       elem_type = "item-with-quality",
@@ -509,7 +796,7 @@ local function add_fluid_request(parent, port)
   request_frame.add{
     type = "choose-elem-button",
     elem_type = "fluid",
-    fluid = port.request,
+    fluid = fluid_is_available(port.request) and port.request or nil,
     tags = {action = "fluid-request"}
   }
 end
@@ -593,21 +880,23 @@ local function collect_storage_entries(player, search)
     if count > 0 then
       local name, quality = split_item_key(key)
       local prototype = prototypes.item[name]
-      local local_name = prototype and prototype.localised_name or name
       local normalised_quality = quality_name(quality)
-      request_localised_name(player, TRANSLATION_KIND_ITEM, name, local_name)
-      if matches_search(state, TRANSLATION_KIND_ITEM, name, normalised_quality, search) then
-        entries[#entries + 1] = {
-          kind = "item",
-          key = key,
-          name = name,
-          quality = normalised_quality,
-          amount = count,
-          sprite = "item/" .. name,
-          tooltip = {"dimensional-port.item-tooltip", local_name, quality_localised_name(normalised_quality), count},
-          sort_parts = prototype_sort_parts(prototype),
-          quality_level = quality_level(normalised_quality)
-        }
+      if prototype and quality_is_available(normalised_quality) then
+        local local_name = prototype.localised_name
+        request_localised_name(player, TRANSLATION_KIND_ITEM, name, local_name)
+        if matches_search(state, TRANSLATION_KIND_ITEM, name, normalised_quality, search) then
+          entries[#entries + 1] = {
+            kind = "item",
+            key = key,
+            name = name,
+            quality = normalised_quality,
+            amount = count,
+            sprite = "item/" .. name,
+            tooltip = {"dimensional-port.item-tooltip", local_name, quality_localised_name(normalised_quality), count},
+            sort_parts = prototype_sort_parts(prototype),
+            quality_level = quality_level(normalised_quality)
+          }
+        end
       end
     end
   end
@@ -615,19 +904,21 @@ local function collect_storage_entries(player, search)
   for name, amount in pairs(storage.dimensional_storage.fluids) do
     if amount > 0 then
       local prototype = prototypes.fluid[name]
-      local local_name = prototype and prototype.localised_name or name
-      request_localised_name(player, TRANSLATION_KIND_FLUID, name, local_name)
-      if matches_search(state, TRANSLATION_KIND_FLUID, name, nil, search) then
-        entries[#entries + 1] = {
-          kind = "fluid",
-          key = fluid_key(name),
-          name = name,
-          amount = amount,
-          sprite = "fluid/" .. name,
-          tooltip = {"dimensional-port.fluid-tooltip", local_name, amount},
-          sort_parts = prototype_sort_parts(prototype),
-          quality_level = 0
-        }
+      if prototype then
+        local local_name = prototype.localised_name
+        request_localised_name(player, TRANSLATION_KIND_FLUID, name, local_name)
+        if matches_search(state, TRANSLATION_KIND_FLUID, name, nil, search) then
+          entries[#entries + 1] = {
+            kind = "fluid",
+            key = fluid_key(name),
+            name = name,
+            amount = amount,
+            sprite = "fluid/" .. name,
+            tooltip = {"dimensional-port.fluid-tooltip", local_name, amount},
+            sort_parts = prototype_sort_parts(prototype),
+            quality_level = 0
+          }
+        end
       end
     end
   end
@@ -819,19 +1110,26 @@ end
 
 local function set_fluid_port_mode(port, mode)
   if port.mode == mode then return end
-  local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
-  if fluid and fluid_is_temperature_safe(fluid) then
-    add_fluid_to_storage(fluid.name, fluid.amount)
-    port.entity.fluidbox[1] = nil
-  end
+  if not return_fluidbox_to_storage(port) then return end
   port.mode = mode
   if mode == "supply" then
     port.request = nil
+    port.materialized = {name = nil, amount = 0}
+  else
+    port.materialized = {name = port.request, amount = 0}
   end
 end
 
+local function set_fluid_request(port, selection)
+  local new_request = fluid_is_available(selection) and selection or nil
+  if port.request == new_request then return end
+  if not return_fluidbox_to_storage(port) then return end
+  port.request = new_request
+  port.materialized = {name = new_request, amount = 0}
+end
+
 local function normalize_item_request(selection)
-  if type(selection) == "table" and selection.name and (selection.type == nil or selection.type == "item") and prototypes.item[selection.name] then
+  if type(selection) == "table" and selection.name and (selection.type == nil or selection.type == "item") and prototypes.item[selection.name] and quality_is_available(selection.quality) then
     return selection.name, quality_name(selection.quality)
   elseif type(selection) == "string" and prototypes.item[selection] then
     return selection, NORMAL_QUALITY
@@ -843,20 +1141,26 @@ local function set_item_request(port, index, selection)
   port.materialized = port.materialized or {}
   local old = port.requests[index]
   if old then
-    local inventory = get_main_inventory(port.entity)
-    if inventory then
-      local count = inventory_count(inventory, old.name, old.quality)
-      if count > 0 then
-        local removed = inventory.remove(stack_definition(old.name, old.quality, count))
-        add_item_to_storage(old.name, old.quality, removed)
+    local old_key = item_key(old.name, old.quality)
+    if item_request_is_available(old) then
+      local inventory = get_main_inventory(port.entity)
+      if inventory then
+        local count = inventory_count(inventory, old.name, old.quality)
+        if count > 0 then
+          local removed = inventory.remove(stack_definition(old.name, old.quality, count))
+          add_item_to_storage(old.name, old.quality, removed)
+        end
       end
+    elseif port.materialized[old_key] and port.materialized[old_key] > 0 then
+      add_item_to_storage(old.name, old.quality, port.materialized[old_key])
     end
-    port.materialized[item_key(old.name, old.quality)] = nil
+    port.materialized[old_key] = nil
   end
   local name, quality = normalize_item_request(selection)
   if name then
-    for other_index, request in pairs(port.requests) do
-      if other_index ~= index and request.name == name and quality_name(request.quality) == quality_name(quality) then
+    for other_index = 1, MAX_ITEM_REQUESTS do
+      local request = port.requests[other_index]
+      if other_index ~= index and item_request_is_available(request) and request.name == name and quality_name(request.quality) == quality_name(quality) then
         set_item_request(port, other_index, nil)
       end
     end
@@ -894,6 +1198,14 @@ if defines.events.script_raised_destroy then pre_remove_events[#pre_remove_event
 script.on_event(pre_remove_events, function(event)
   on_entity_removed(event.entity)
 end)
+
+if defines.events.on_entity_cloned then
+  script.on_event(defines.events.on_entity_cloned, on_entity_cloned)
+end
+
+if defines.events.on_object_destroyed then
+  script.on_event(defines.events.on_object_destroyed, on_registered_object_destroyed)
+end
 
 script.on_nth_tick(UPDATE_INTERVAL, function()
   ensure_storage()
@@ -971,7 +1283,7 @@ script.on_event(defines.events.on_gui_elem_changed, function(event)
     set_item_request(port, tags.index, element.elem_value)
     refresh_gui(player)
   elseif tags.action == "fluid-request" and port_type == "fluid" then
-    port.request = element.elem_value
+    set_fluid_request(port, element.elem_value)
     refresh_gui(player)
   end
 end)
