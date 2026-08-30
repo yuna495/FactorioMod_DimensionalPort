@@ -13,6 +13,8 @@ local TRANSLATION_KIND_ITEM = "item"
 local TRANSLATION_KIND_FLUID = "fluid"
 local STORAGE_ENTRY_PREFIX = "dimensional_port_storage_entry_"
 local STORAGE_SIGNATURE_SEPARATOR = "\31"
+local CIRCUIT_SIGNAL_MAX = 2147483647
+local COMBINATOR_REGISTRY_VERSION = 1
 
 local migrate_fluid_storage_temperature
 
@@ -59,6 +61,7 @@ local function ensure_storage()
   storage.dimensional_storage.fluids = storage.dimensional_storage.fluids or {}
   storage.item_ports = storage.item_ports or {}
   storage.fluid_ports = storage.fluid_ports or {}
+  storage.dimensional_combinators = storage.dimensional_combinators or {}
   storage.players = storage.players or {}
   storage.destroy_registrations = storage.destroy_registrations or {}
   storage.distribution_offsets = storage.distribution_offsets or {items = {}, fluids = {}}
@@ -629,6 +632,15 @@ local function register_fluid_port(entity)
   apply_fluid_request_filter(port)
 end
 
+local function register_dimensional_combinator(entity)
+  if not (entity and entity.valid) then return end
+  local combinator = storage.dimensional_combinators[entity.unit_number] or {}
+  combinator.entity = entity
+  combinator.signature = nil
+  storage.dimensional_combinators[entity.unit_number] = combinator
+  register_destroy_watch(combinator, entity, "combinator")
+end
+
 local function unregister_item_port(entity)
   if not (entity and entity.valid) then return end
   local port = storage.item_ports[entity.unit_number]
@@ -655,6 +667,14 @@ local function unregister_fluid_port(entity)
   storage.fluid_ports[entity.unit_number] = nil
 end
 
+local function unregister_dimensional_combinator(entity)
+  if not (entity and entity.valid) then return end
+  local combinator = storage.dimensional_combinators[entity.unit_number]
+  if not combinator then return end
+  clear_destroy_registration(combinator)
+  storage.dimensional_combinators[entity.unit_number] = nil
+end
+
 local function unregister_lost_item_port(unit_number, port)
   local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
   return_materialized_items_to_storage(port)
@@ -667,6 +687,35 @@ local function unregister_lost_fluid_port(unit_number, port)
   return_materialized_fluid_to_storage(port)
   clear_destroy_registration(port)
   storage.fluid_ports[unit_number] = nil
+end
+
+local function unregister_lost_dimensional_combinator(unit_number, combinator)
+  clear_destroy_registration(combinator)
+  storage.dimensional_combinators[unit_number] = nil
+end
+
+local function rebuild_dimensional_combinators()
+  local previous = storage.dimensional_combinators or {}
+  local rebuilt = {}
+
+  for _, surface in pairs(game.surfaces) do
+    for _, entity in pairs(surface.find_entities_filtered{name = names.combinator_entity}) do
+      local combinator = previous[entity.unit_number] or {}
+      combinator.entity = entity
+      combinator.signature = nil
+      rebuilt[entity.unit_number] = combinator
+      register_destroy_watch(combinator, entity, "combinator")
+    end
+  end
+
+  for unit_number, combinator in pairs(previous) do
+    if not rebuilt[unit_number] then
+      unregister_lost_dimensional_combinator(unit_number, combinator)
+    end
+  end
+
+  storage.dimensional_combinators = rebuilt
+  storage.dimensional_combinator_registry_version = COMBINATOR_REGISTRY_VERSION
 end
 
 local function rebuild_ports()
@@ -728,6 +777,8 @@ local function on_entity_created(entity)
   elseif entity.name == names.fluid_port_entity then
     register_fluid_port(entity)
     draw_vortex(entity)
+  elseif entity.name == names.combinator_entity then
+    register_dimensional_combinator(entity)
   end
 end
 
@@ -738,6 +789,8 @@ local function on_entity_removed(entity)
     unregister_item_port(entity)
   elseif entity.name == names.fluid_port_entity then
     unregister_fluid_port(entity)
+  elseif entity.name == names.combinator_entity then
+    unregister_dimensional_combinator(entity)
   end
 end
 
@@ -762,6 +815,8 @@ local function on_entity_cloned(event)
   elseif entity.name == names.fluid_port_entity then
     clear_cloned_fluid_port_fluidbox(entity)
     register_fluid_port(entity)
+  elseif entity.name == names.combinator_entity then
+    register_dimensional_combinator(entity)
   end
 end
 
@@ -785,6 +840,8 @@ local function on_registered_object_destroyed(event)
       return_materialized_fluid_to_storage(port)
       storage.fluid_ports[registration.unit_number] = nil
     end
+  elseif registration.port_type == "combinator" then
+    storage.dimensional_combinators[registration.unit_number] = nil
   end
 end
 
@@ -1493,6 +1550,120 @@ local function collect_storage_entries(player, search)
   return entries
 end
 
+local function circuit_signal_count(amount)
+  local count = math.floor(amount or 0)
+  if count <= 0 then return nil end
+  return math.min(count, CIRCUIT_SIGNAL_MAX)
+end
+
+local function collect_circuit_signal_entries()
+  local entries = {}
+
+  for key, count in pairs(displayed_item_counts()) do
+    local signal_count = circuit_signal_count(count)
+    if signal_count then
+      local name, quality = split_item_key(key)
+      local normalised_quality = quality_name(quality)
+      local prototype = prototypes.item[name]
+      if prototype and quality_is_available(normalised_quality) then
+        entries[#entries + 1] = {
+          kind = "item",
+          key = key,
+          signal = {type = "item", name = name, quality = normalised_quality},
+          count = signal_count,
+          sort_parts = prototype_sort_parts(prototype),
+          quality_level = quality_level(normalised_quality)
+        }
+      end
+    end
+  end
+
+  for name, stored_fluid in pairs(storage.dimensional_storage.fluids) do
+    local fluid_entry = normalise_fluid_storage_entry(name, stored_fluid)
+    local signal_count = circuit_signal_count(fluid_entry and fluid_entry.amount or 0)
+    local prototype = prototypes.fluid[name]
+    if signal_count and prototype then
+      entries[#entries + 1] = {
+        kind = "fluid",
+        key = fluid_key(name),
+        signal = {type = "fluid", name = name, quality = NORMAL_QUALITY},
+        count = signal_count,
+        sort_parts = prototype_sort_parts(prototype),
+        quality_level = 0
+      }
+    end
+  end
+
+  table.sort(entries, storage_entry_less)
+  return entries
+end
+
+local function circuit_signal_signature(entries)
+  local parts = {}
+  for index, entry in ipairs(entries) do
+    local signal = entry.signal
+    parts[index] = (signal.type or "item") .. ":" .. signal.name .. ":" .. (signal.quality or NORMAL_QUALITY) .. ":" .. entry.count
+  end
+  return table.concat(parts, STORAGE_SIGNATURE_SEPARATOR)
+end
+
+local function sync_combinator_sections(entity, entries)
+  if not (entity and entity.valid) then return false end
+  local behavior = entity.get_control_behavior()
+  if not behavior then return false end
+  behavior.enabled = true
+
+  local filters_per_section = prototypes.utility_constants.max_logistic_filter_count
+  if type(filters_per_section) ~= "number" or filters_per_section <= 0 then return false end
+  local needed_sections = math.max(1, math.ceil(#entries / filters_per_section))
+
+  while behavior.sections_count < needed_sections do
+    if not behavior.add_section() then return false end
+  end
+  while behavior.sections_count > needed_sections do
+    if not behavior.remove_section(behavior.sections_count) then return false end
+  end
+
+  for section_index = 1, needed_sections do
+    local section = behavior.get_section(section_index)
+    if not (section and section.valid and section.is_manual) then return false end
+    local filters = {}
+    local first = ((section_index - 1) * filters_per_section) + 1
+    local last = math.min(section_index * filters_per_section, #entries)
+    for entry_index = first, last do
+      local entry = entries[entry_index]
+      filters[#filters + 1] = {value = entry.signal, min = entry.count}
+    end
+    section.filters = filters
+    section.active = true
+    section.multiplier = 1
+  end
+  return true
+end
+
+local function sync_dimensional_combinator(combinator, entries, signature, force)
+  if not (combinator and combinator.entity and combinator.entity.valid) then return end
+  entries = entries or collect_circuit_signal_entries()
+  signature = signature or circuit_signal_signature(entries)
+  if not force and combinator.signature == signature then return end
+  if sync_combinator_sections(combinator.entity, entries) then combinator.signature = signature end
+end
+
+local function sync_dimensional_combinators(force)
+  if storage.dimensional_combinator_registry_version ~= COMBINATOR_REGISTRY_VERSION then
+    rebuild_dimensional_combinators()
+  end
+  local entries = collect_circuit_signal_entries()
+  local signature = circuit_signal_signature(entries)
+  for unit_number, combinator in pairs(storage.dimensional_combinators) do
+    if combinator.entity and combinator.entity.valid then
+      sync_dimensional_combinator(combinator, entries, signature, force)
+    else
+      storage.dimensional_combinators[unit_number] = nil
+    end
+  end
+end
+
 local function add_storage_entry(parent, entry, index)
   local icon = parent.add{
     type = "sprite-button",
@@ -1776,11 +1947,13 @@ end
 script.on_init(function()
   ensure_storage()
   rebuild_ports()
+  rebuild_dimensional_combinators()
 end)
 
 script.on_configuration_changed(function()
   ensure_storage()
   rebuild_ports()
+  rebuild_dimensional_combinators()
 end)
 
 script.on_event({
@@ -1809,10 +1982,21 @@ if defines.events.on_object_destroyed then
   script.on_event(defines.events.on_object_destroyed, on_registered_object_destroyed)
 end
 
+if defines.events.on_entity_settings_pasted then
+  script.on_event(defines.events.on_entity_settings_pasted, function(event)
+    ensure_storage()
+    local entity = event.destination
+    if entity and entity.valid and entity.name == names.combinator_entity then
+      register_dimensional_combinator(entity)
+    end
+  end)
+end
+
 script.on_nth_tick(UPDATE_INTERVAL, function()
   ensure_storage()
   process_item_ports()
   local changed_fluid_requests = process_fluid_ports()
+  sync_dimensional_combinators(false)
   for _, player in pairs(game.connected_players) do
     local state = storage.players and storage.players[player.index]
     local frame = player.gui.screen.dimensional_port_frame
@@ -1838,6 +2022,8 @@ script.on_event(defines.events.on_gui_opened, function(event)
     player.opened = nil
     local port = storage.fluid_ports[entity.unit_number]
     if port then build_gui(player, port, "fluid") end
+  elseif entity.name == names.combinator_entity then
+    player.opened = nil
   end
 end)
 

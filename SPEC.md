@@ -701,6 +701,7 @@ GUIの具体的な配置、各要素のサイズ、列数、スクロール領�
 * Dimensional Storage内のアイテム一覧
 * アイコンおよび数量表示
 * アイテム検索
+* Dimensional CombinatorによるRead-Only回路出力
 
 GUIの視覚的な配置について、SPECに記載されていない部分を実装上の恒久仕様として扱わない。
 
@@ -972,9 +973,24 @@ port.materialized = {
 
 ---
 
-### 18.3 Technology
+### 18.3 Dimensional Combinator
 
-初期実装では、Item PortおよびFluid Portをゲーム開始時から利用可能とする。
+初期開発およびテスト段階では、Dimensional CombinatorのCrafting Recipeを以下とする。
+
+```text
+鉄板 × 1
+→ Dimensional Combinator × 1
+```
+
+このRecipeは暫定仕様である。
+
+専用Technologyは設けず、ゲーム開始時から利用可能とする。
+
+---
+
+### 18.4 Technology
+
+初期実装では、Item Port、Fluid PortおよびDimensional Combinatorをゲーム開始時から利用可能とする。
 
 専用Technologyによる研究解放は要求しない。
 
@@ -982,23 +998,19 @@ Technologyおよび研究コストについては、ゲームバランス調整�
 
 ## 19. 回路ネットワーク
 
-回路ネットワーク対応は将来実装とする。
+Dimensional Storageの在庫を回路ネットワークへ出力する専用Entityとして、**Dimensional Combinator（次元コンビネータ）**を使用する。
 
-初回実装の必須要件には含めない。
+Dimensional CombinatorはRead-Only専用とし、回路ネットワークからの入力によってDimensional Storage、Item Port、Fluid Port、Request設定を変更してはならない。
 
-将来的にはDimensional Storage内の在庫数量を回路信号として取得できる機能を検討する。
+出力対象はItem、Item + Quality、Fluidとする。ItemはGUIと同じくDimensional Storage内数量とItem Portのmaterialized共有キャッシュを合算する。Quality違いは別信号とする。FluidはDimensional Storageに存在するFluid Prototypeごとのamountを出力し、temperatureは出力しない。
 
-例：
+数量0以下は出力しない。Fluidの小数amountは回路信号化時に整数へ切り捨てる。int32上限を超える数量は2147483647へclampする。
 
-```text
-鉄板 = 12000
-銅板 = 6000
-電子基板 = 3800
-```
+複数設置されたDimensional CombinatorはSurfaceやPlanetに関係なく同一のグローバルDimensional Storageを参照する。更新周期は30 tickとし、実在するStorageエントリのみ走査する。同一内容はsignature比較で不要な再書き込みを避ける。
 
-通常のDimensional Port自身から信号を出力する方式だけでなく、専用Combinator Entityを追加する方式も候補とする。
+信号順序はGUIと同系統のPrototype順・Quality順で安定化する。一つのsectionに収まらない場合は`prototypes.utility_constants.max_logistic_filter_count`を上限として複数sectionへ分割する。`LuaLogisticSection::filters_count`は現在のfilter数であり容量ではないため、容量判定に使用しない。
 
-具体的な方式は未確定。
+vanilla constant combinator由来の編集GUIは開かせず、出力内容はMOD側が管理する。
 
 ---
 
@@ -1105,7 +1117,7 @@ Dimensional Portは、通常空間とは異なる共有された異次元空間�
 
 Fluid PortについてはItem Portの基本実装を基礎として実装する。
 
-回路ネットワーク対応は初回実装の必須要件に含めない。
+回路ネットワークからのRequest変更、Storage操作、条件制御は初回実装の対象外とする。
 
 ---
 
@@ -1118,7 +1130,7 @@ Fluid PortについてはItem Portの基本実装を基礎として実装する�
 * 最終的なCrafting Recipeおよびコスト
 * 将来的なTechnologyおよび研究コスト
 * 温度付き流体の具体的な内部表現
-* 回路ネットワーク対応方式
+* 回路入力によるRequest変更、Storage操作、条件制御
 * 大量Port設置時の具体的な更新分散アルゴリズム
 
 これらは実装・性能測定・Factorio 2.0 API仕様確認を行った上で決定する。
