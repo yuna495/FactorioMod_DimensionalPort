@@ -60,14 +60,13 @@ storage.dimensional_storage = {
 
 アイテム用Dimensional Portは、同一のEntity Prototypeを使用する。
 
-設置後、各Portについて以下のモードを選択できる。
+Item PortはSupply / Requestの手動モード切替を持たない。
 
-* `Supply`
-* `Request`
+各Portは常に双方向Portとして動作し、外部から投入されたアイテムをDimensional Storageへ格納できる。
 
-Supply用EntityとRequest用Entityを別々には作成しない。
+Requestが指定されている場合は、指定アイテムおよび品質をDimensional Storageから内部Request Bufferへ実体化し、外部から取り出せるようにする。
 
-モードはPort単位で保持する。
+Requestが指定されていない場合は、外部から投入されたアイテムを30 tickごとにDimensional Storageへ送るため、実質的に旧Supply Port相当として動作する。
 
 ---
 
@@ -101,39 +100,45 @@ Item Portの内部Inventoryサイズは、通常の鋼鉄チェストと同等�
 
 初期実装では、vanillaの鋼鉄チェストに準拠したInventory容量を使用する。
 
-このInventoryは以下の用途に使用する。
+このInventoryは、Request BufferとIngress Bufferに分けて使用する。
 
-* Supplyモードで、外部から投入されたアイテムをDimensional Storageへ送るまでの一時バッファ
-* Requestモードで、Dimensional Storageから実体化したアイテムを外部へ取り出すための一時バッファ
+* slots 1～40: Request Buffer
+* slots 41～48: Ingress Buffer
+
+Request Bufferは、最大8種類のRequestに対して各5スロットずつ割り当てる。
+
+Ingress Bufferは、外部から投入された任意のアイテムを一時的に受け入れ、30 tick更新時にRequest BufferまたはDimensional Storageへ移動する。
 
 Dimensional StorageそのものをItem PortのInventoryへ保持してはならない
 
 ---
 
-## 4. Supplyモード
+## 4. Item Portの投入処理
 
 ### 4.1 基本動作
 
-SupplyモードのPortは、内部Inventoryへ投入された全アイテムをDimensional Storageへ送る。
+Item Portは、外部から投入されたアイテムを常に受け入れ、30 tickごとに処理する。
 
-投入するアイテムの種類を事前指定する必要はない。
+Requestが存在しない場合、内部Inventoryへ投入された全アイテムをDimensional Storageへ送る。
 
-通常のインサータ、ローダー等によってPortへ投入されたアイテムを受け付ける。
+Requestが存在する場合、Request Bufferに対応するアイテムおよび品質は不足分として利用し、Request対象外または上限を超えるアイテムはDimensional Storageへ送る。
 
 ---
 
 ### 4.2 吸収周期
 
-Supply Portは原則として、**30 tickごと**に処理する。
+Item Portの投入処理は原則として、**30 tickごと**に処理する。
 
-処理時点でPort内部Inventoryに存在するアイテムをすべてDimensional Storageへ移動する。
+Requestが存在しない場合、処理時点でPort内部Inventoryに存在するアイテムをすべてDimensional Storageへ移動する。
 
-数量による転送上限は設けない。
+Requestが存在する場合、Ingress Buffer内のアイテムを確認し、対応するRequest Bufferに空きがある要求対象アイテムはRequest Bufferへ移動する。
+
+Request Bufferへ入りきらない分、およびRequest対象外アイテムはDimensional Storageへ送る。
 
 例：
 
 ```text
-Supply Port
+RequestなしItem Port
 
 鉄板    800
 銅板    300
@@ -147,26 +152,30 @@ Dimensional Storage
 銅板   +300
 歯車    +50
 
-Supply Port
+Item Port
 
 空
 ```
 
 ---
 
-### 4.3 Supplyの基本思想
+### 4.3 Ingress Buffer
 
-異次元空間へ物質を送り込む処理は高速であり、Portへ投入済みの物資は一括して吸収できるものとする。
+Ingress Bufferはslots 41～48の8スロットとする。
 
-Supply側には、Request側と同様の5スタック制限を設けない。
+Ingress BufferにはInventory filterを設定しない。
+
+外部から投入されたアイテムがRequest対象であり、対応Request Bufferに空きがある場合、そのアイテムはDimensional Storageへ一度送らずにRequest Bufferへ移動する。
+
+Request Bufferに入ったアイテムは、Dimensional Storageから実体化されたアイテムと同様に、共有キャッシュとして扱う。
 
 ---
 
-## 5. Requestモード
+## 5. Request設定
 
 ### 5.1 要求アイテム指定
 
-Requestモードでは、プレイヤーが取り出したいアイテムをGUIから指定する。
+Item Portでは、プレイヤーが取り出したいアイテムをGUIから指定できる。
 
 要求アイテムは複数指定可能とする。
 
@@ -186,21 +195,21 @@ Requestモードでは、プレイヤーが取り出したいアイテムをGUI�
 
 ### 5.2 最大要求アイテム数
 
-一つのItem Portで同時に指定可能な要求アイテム数は、最大9種類とする。
+一つのItem Portで同時に指定可能な要求アイテム数は、最大8種類とする。
 
-Item Portの内部Inventoryは48スロットであり、各要求アイテムについて5スタック分を維持するため、
+Item Portの内部Inventoryは48スロットであり、各要求アイテムについて5スロットを割り当てるため、
 
-5スタック × 9種類 = 45スロット
+5スロット × 8種類 = 40スロット
 
-を最大要求数とする。
+をRequest Bufferとして使用する。
 
-残り3スロットについては、要求アイテム数の追加には使用しない。
+残り8スロットはIngress Bufferとして使用し、要求アイテム数の追加には使用しない。
 
-要求アイテム数が9種類を超える設定は許可しない。
+要求アイテム数が8種類を超える設定は許可しない。
 
 各要求スロットでは、アイテムおよび品質を指定できる。
 
-要求スロットは最大9スロットの固定位置として扱う。
+要求スロットは最大8スロットの固定位置として扱う。
 
 途中に空スロットが存在しても、それ以降の要求スロットは有効な要求として処理する。
 
@@ -234,54 +243,64 @@ stack_sizeが200なら、
 
 となる。
 
-Requestモードでは、外部からItem Port内部Inventoryへのアイテム投入を受け付けない。
+Requestが指定されているItem Portでも、外部からItem Port内部Inventoryへのアイテム投入を受け付ける。
 
-Requestモードの内部Inventoryは、Dimensional Storageから実体化された要求アイテムを保持し、インサータ、ローダー、プレイヤー等によって外部へ取り出すためのバッファとして使用する。
+Request Bufferは、Dimensional Storageから実体化された要求アイテム、および外部から投入されて同じ要求アイテムとして受け入れられたアイテムを保持し、インサータ、ローダー、プレイヤー等によって外部へ取り出すためのバッファとして使用する。
 
-要求対象外のアイテムによって内部Inventoryが占有され、各要求アイテムの5スタック維持が妨げられる状態を許可しない。
+Request Bufferに割り当てられた各5スロットには、対応するアイテムおよび品質のInventory filterを設定する。
 
-初期実装では、FactorioのContainer Prototypeで利用可能なfilter付きInventoryを使用し、Requestモード時は要求アイテムおよび品質に対応するslot filterを設定する。
+要求スロットが空の場合、その5スロットのInventory filterは解除する。
 
-Factorioの通常Container Inventoryで「外部からの投入だけを完全禁止し、取り出しは許可する」ことをPrototype設定のみで完全保証できない場合、slot filterおよび定期更新時の混入検出・Dimensional Storage返却によって、要求対象外アイテムまたはmaterialized数を超える投入分がバッファを占有し続けないようにする。
+Ingress BufferにはInventory filterを設定しない。
 
-この場合も、外部から混入した物資を消滅させず、Dimensional Storageへ返却することを優先する。
+要求対象外のアイテムによってRequest Bufferが占有された場合、30 tick更新時にDimensional Storageへ返却し、各要求アイテムの5スタック維持を妨げ続けないようにする。
 
-MODはRequest Portごとに、Dimensional Storageから実体化して内部Inventoryへ供給したアイテム数量を、アイテムおよび品質ごとに永続stateとして記録する。
+MODはItem Portごとに、Request Buffer内で共有キャッシュとして扱うアイテム数量を、アイテムおよび品質ごとに永続stateとして記録する。
 
-この記録は、Request Port内部に存在する物資がDimensional Storage由来であるかを判定し、Request設定変更、モード変更、Port撤去・破壊、外部からの混入検出時に物資総量保存則を維持するために使用する。
+この記録は、Request設定変更、Port撤去・破壊、事前削除イベントを通らないEntity消滅時に物資総量保存則を可能な限り維持するために使用する。
 
 この記録はDimensional Storageそのものではなく、Port内部Inventoryに実体化している数量を追跡するための補助stateである。
 
-Request Port内部の実体化済みアイテムは、そのPortが恒久的に所有する在庫ではなく、Dimensional Storageから一時的に通常空間へ実体化された共有キャッシュとして扱う。
+Request Buffer内のアイテムは、そのPortが恒久的に所有する在庫ではなく、通常空間へ実体化された共有キャッシュとして扱う。
 
-実体化済みアイテムは、Portからインサータ、ローダー、プレイヤー等によって外部へ取り出されるまでは、同一アイテムおよび品質を要求する他のRequest Portへ再配分可能とする。
+Request Buffer内のアイテムは、Portからインサータ、ローダー、プレイヤー等によって外部へ取り出されるまでは、同一アイテムおよび品質を要求する他のItem Portへ再配分可能とする。
 
 再配分対象として扱う数量は、Port内部Inventory内の全数量ではなく、`materialized` stateに記録され、かつ実Inventory内に存在している数量に限る。
 
-外部から混入したアイテムを、共有キャッシュとして勝手に再配分してはならない。
+Ingress Buffer内にある未処理アイテムは、共有キャッシュとして扱わない。
 
 ---
 
 ### 6.2 補充周期
 
-Request Portは原則として、**30 tickごと**に補充処理する。
+Request補充は原則として、**30 tickごと**に処理する。
 
 各要求アイテムについて、
 
 ```text
-不足数 = 5スタック分 - Port内部の現在数量
+最大保持量 = 5スタック分
+補充閾値 = 4スタック分
 ```
 
-を計算する。
+を使用する。
 
-不足している場合のみDimensional Storageから取り出す。
+現在量が4スタック分以上である場合、Dimensional Storageから補充しない。
+
+現在量が4スタック分未満である場合のみ、
+
+```text
+不足数 = 5スタック分 - 現在数量
+```
+
+を計算し、Dimensional Storageから取り出す。
 
 例：
 
 ```text
 鉄板
 
-目標：500
+最大：500
+補充閾値：400
 現在：380
 
 不足：120
@@ -293,7 +312,7 @@ Dimensional Storageに120以上存在する場合、
 Dimensional Storage
 鉄板 -120
 
-Request Port
+Request指定Item Port
 鉄板 380 → 500
 ```
 
@@ -305,12 +324,12 @@ Request Port
 
 Dimensional Storageに存在しないアイテムは生成してはならない。
 
-Request Portが要求している数量よりDimensional Storageの在庫が少ない場合、存在する数量のみ供給する。
+Request指定Item Portが要求している数量よりDimensional Storageの在庫が少ない場合、存在する数量のみ供給する。
 
 例：
 
 ```text
-Request Port
+Request指定Item Port
 
 鉄板
 目標：500
@@ -323,34 +342,34 @@ Dimensional Storage
 結果：
 
 ```text
-Request Port
+Request指定Item Port
 鉄板：73
 
 Dimensional Storage
 鉄板：0
 ```
 
-新たな鉄板がSupply PortからDimensional Storageへ投入された場合、以後のRequest更新時に再び補充可能となる。
+新たな鉄板がRequestなしItem PortなどからDimensional Storageへ投入された場合、以後のRequest更新時に再び補充可能となる。
 
 ---
 
-## 8. 複数Request Port間の公平配分
+## 8. 複数Request指定Port間の公平配分
 
 ### 8.1 基本原則
 
-同一アイテムを複数のRequest Portが要求しており、すべての不足分を満たすだけの仮想在庫が存在しない場合、利用可能な在庫をRequest Port間で可能な限り均等に配分する。
+同一アイテムを複数のRequest指定Item Portが要求しており、すべての不足分を満たすだけの仮想在庫が存在しない場合、利用可能な在庫をRequest指定Item Port間で可能な限り均等に配分する。
 
 Entityの処理順によって、先に処理されたPortだけが在庫を取得する仕様にしてはならない。
 
-アイテムのように整数単位で配分する物資について、在庫がRequest Port数より少ない場合でも、同じPortだけが恒常的に優先されてはならない。
+アイテムのように整数単位で配分する物資について、在庫がRequest指定Item Port数より少ない場合でも、同じPortだけが恒常的に優先されてはならない。
 
 割り切れない余りは、同一アイテムおよび品質ごとに次回以降の配分開始位置をずらしながら配分する。
 
 流体については、不足量を上限として可能な限り直接均等に配分する。
 
-同一アイテムおよび品質を要求するRequest Portの集合が変化した場合、既に各Request Portへ実体化されている共有キャッシュも含めて、必要に応じて公平に再平衡する。
+同一アイテムおよび品質を要求するRequest指定Item Portの集合が変化した場合、既に各Request指定Item Portへ実体化されている共有キャッシュも含めて、必要に応じて公平に再平衡する。
 
-再平衡では、Dimensional Storage内数量と各Request Portの`materialized`数量を共有可能総量として扱い、各Request Portの5スタック上限を超えない範囲で望ましい割当量を計算する。
+再平衡では、Dimensional Storage内数量と各Request指定Item Portの`materialized`数量を共有可能総量として扱い、各Request指定Item Portの5スタック上限を超えない範囲で望ましい割当量を計算する。
 
 割当量を超えて保持しているPortからは、超過分のみをInventoryから回収してDimensional Storageへ返却し、その後、不足しているPortへDimensional Storageから実体化する。
 
@@ -368,7 +387,7 @@ Dimensional Storage：
 鉄板：300
 ```
 
-Request Port：
+Request指定Item Port：
 
 ```text
 Port A
@@ -446,14 +465,14 @@ Port C +150
 
 ## 9. 複数アイテム要求
 
-一つのRequest Portが複数種類のアイテムを要求している場合、各要求アイテムは独立して扱う。
+一つのRequest指定Item Portが複数種類のアイテムを要求している場合、各要求アイテムは独立して扱う。
 
 Port全体で5スタックを共有するのではない。
 
 例：
 
 ```text
-Request Port
+Request指定Item Port
 
 鉄板
 銅板
@@ -476,7 +495,7 @@ Request Port
 
 ## 10. Request設定変更
 
-Request Portで要求アイテムを解除または変更した場合、そのアイテムについてPort内部に残っている物資をDimensional Storageへ返却する。
+Item Portで要求アイテムを解除または変更した場合、その要求に割り当てられたRequest Buffer内に残っている物資をDimensional Storageへ返却する。
 
 Fluid Portで要求流体を解除または変更した場合も、Port内部に残っている旧要求流体をDimensional Storageへ安全に返却してから新しい要求を設定する。
 
@@ -507,27 +526,29 @@ Fluid Portで要求流体を解除または変更した場合も、Port内部に
 
 ## 11. モード変更
 
-RequestからSupplyへ変更する場合、Request用内部バッファに残っている物資をDimensional Storageへ返却する。
+Supply / Requestの手動モード切替は廃止する。
 
-SupplyからRequestへ変更する場合も、変更時点で内部Inventoryに残っているアイテムについて適切にDimensional Storageへ格納し、アイテムの消失または複製が発生しないようにする。
+旧セーブに保存されている`port.mode = "supply"`は、Requestなしの双方向Portとして移行する。
 
-モード変更によって物資総量が変化してはならない。
+旧セーブに保存されている`port.mode = "request"`は、既存のRequest設定を維持した双方向Portとして移行する。
+
+移行によって物資総量が変化してはならない。
 
 ---
 
 ## 12. Entity破壊・撤去
 
-Dimensional Portが撤去・破壊された場合、内部Inventoryまたはfluidboxに残っている内容物を、そのモードおよび由来に応じて安全に処理する。
+Dimensional Portが撤去・破壊された場合、内部Inventoryまたはfluidboxに残っている内容物を安全に処理する。
 
-RequestモードでDimensional Storageから実体化された物資はDimensional Storageへ返却する。
-
-SupplyモードでまだDimensional Storageへ吸収されていない物資については、通常のEntity撤去・破壊時の挙動を尊重し、不当にDimensional Storageへ送信したり消失させたりしてはならない。
+通常の事前削除イベントでEntity内部のInventoryまたはfluidboxを参照できる場合、Request BufferおよびIngress Buffer内のアイテム、またはfluidbox内の安全に扱える流体をDimensional Storageへ返却する。
 
 Portの撤去・破壊によってアイテムまたは流体の複製・不当な消失が発生してはならない。
 
 通常のプレイヤー操作による採掘だけでなく、Entity死亡、スクリプトによる削除等についても考慮する。
 
-通常の事前削除イベントを通らずPort Entityが無効化された場合でも、Request Portについては永続stateに記録された実体化済み数量をDimensional Storageへ返却し、総量保存則を可能な限り維持する。
+通常の事前削除イベントを通らずPort Entityが無効化された場合でも、永続stateに記録されたRequest Buffer内の共有キャッシュ数量をDimensional Storageへ返却し、総量保存則を可能な限り維持する。
+
+ただしEntity消滅後に実Inventoryを参照できない場合、Ingress Buffer内の未処理アイテムや、前回同期後に外部から投入された未同期アイテムはMOD側で正確に復元できない。
 
 通常の事前削除イベントと破壊監視による後続通知で二重返却してはならない。
 
@@ -569,15 +590,9 @@ Dimensional Storageに保存済みのPrototype名またはQuality Prototype名�
 
 Item PortのGUIには最低限以下を表示する。
 
-#### モード
-
-```text
-[ Supply ] [ Request ]
-```
-
 #### Request設定
 
-Requestモードの場合のみ表示する。
+Item Portでは常にRequest設定を表示する。
 
 複数の要求アイテムをアイコンによって指定できる。
 
@@ -599,13 +614,13 @@ Normal品質も選択可能とする。
 
 要求解除はFactorio標準の選択解除操作を使用し、専用の削除ボタンは設けない。
 
-RequestモードのItem Portでは、Dimensional Storage一覧に表示されているアイテムアイコンをクリックすることでも、最初の空き要求スロットへ同じアイテムおよび品質を追加できる。
+Item Portでは、Dimensional Storage一覧に表示されているアイテムアイコンをクリックすることでも、最初の空き要求スロットへ同じアイテムおよび品質を追加できる。
 
 この追加操作では、既に同じアイテムおよび品質が要求に存在する場合は重複追加しない。
 
 要求スロットがすべて埋まっている場合、またはクリックした一覧項目がItem Prototypeではない場合は、要求を変更しない。
 
-要求スロットは9列で表示し、初回実装での最大要求数9種類を1行に収める。
+要求スロットは8列で表示し、最大要求数8種類を1行に収める。
 
 ```text
 [鉄板] [銅板] [電子基板] [+]
@@ -617,7 +632,7 @@ RequestモードのItem Portでは、Dimensional Storage一覧に表示されて
 
 現在Dimensional Storageに存在するアイテムを、**アイコン + 数量**形式で一覧表示する。
 
-Item PortのGUIでは、すべてのRequest Portが保持している実体化済みバッファ分も、Portから取り出し可能な在庫として一覧数量へ含める。
+Item PortのGUIでは、すべてのRequest指定Item Portが保持している実体化済みバッファ分も、Portから取り出し可能な在庫として一覧数量へ含める。
 
 この表示上の合算はGUI上の見やすさのためのものであり、Dimensional Storage内数量そのものを増減させるものではない。
 
@@ -631,7 +646,7 @@ Factorioの物流ネットワーク在庫表示に近い形式を使用する。
 
 アイテムおよび流体の数量は、通常のFactorioアイコン表示に近い形で、アイコンタイルの右下に表示する。
 
-Dimensional Storage一覧は9列で表示し、表示領域を超える場合はスクロールによって全項目を確認できるようにする。
+Dimensional Storage一覧は10列で表示し、表示領域を超える場合はスクロールによって全項目を確認できるようにする。
 
 Dimensional Storage一覧の表示順は、可能な限りFactorio本体のインベントリや製作画面に近い順序とする。
 
@@ -658,7 +673,9 @@ Normal品質では品質マークを表示しない。
 
 アイテムTooltipに表示する品質名は、Quality Prototypeの`localised_name`を使用し、プレイヤーの表示言語に従う。
 
-Fluid PortのRequestモードでは、Dimensional Storage一覧に表示されているFluid Prototypeのアイコンをクリックすることでも、その流体を要求流体として指定できる。
+Fluid Portでは常にRequest流体選択欄を表示する。
+
+Fluid Portでは、Dimensional Storage一覧に表示されているFluid Prototypeのアイコンをクリックすることでも、その流体を要求流体として指定できる。
 
 Item PortではFluid Prototypeを要求アイテムとして追加してはならず、Fluid PortではItem Prototypeを要求流体として指定してはならない。
 
@@ -670,8 +687,7 @@ GUIの具体的な配置、各要素のサイズ、列数、スクロール領�
 
 現時点では以下の機能要件のみを固定する。
 
-* Supply / Requestモード切替
-* Requestモード時の要求アイテム指定
+* Request設定
 * Dimensional Storage内のアイテム一覧
 * アイコンおよび数量表示
 * アイテム検索
@@ -690,7 +706,7 @@ Dimensional Storage一覧には検索機能を設ける。
 
 検索UIは、バニラの検索機構を直接再利用できない場合でも、Factorio標準GUIに近い見た目・操作性を持つ自前検索として実装する。
 
-検索対象は、Dimensional Storageに実際に存在するアイテム・流体、およびRequest Port内に実体化している表示対象のアイテムのみとする。
+検索対象は、Dimensional Storageに実際に存在するアイテム・流体、およびRequest指定Item Port内に実体化している表示対象のアイテムのみとする。
 
 検索は、内部prototype名に加えて、プレイヤーの表示言語でのローカライズ済み名称にも対応する。
 
@@ -712,10 +728,13 @@ GUI表示中に必要な対象だけを翻訳・キャッシュし、毎tick全p
 
 流体についてもItem Portと同様にDimensional Storageへ数量として保存する。
 
-Fluid Portは一つのEntity Prototypeを使用し、各設置個体について以下のモードを切り替える。
+Fluid Portは一つのEntity Prototypeを使用する。
 
-* `Supply`
-* `Request`
+Fluid PortはSupply / Requestの手動モード切替を持たない。
+
+Request流体が指定されていない場合、流入した流体を30 tickごとにDimensional Storageへ吸収する。
+
+Request流体が指定されている場合、その流体用の双方向Portとして動作し、外部から流入した同一流体をそのまま利用しながら、不足分をDimensional Storageから補充する。
 
 ---
 
@@ -749,13 +768,13 @@ Fluid Portのfluidbox容量は、
 
 とする。
 
-この容量はSupplyおよびRequestの両モードで共通とする。
+この容量はRequest流体の有無に関わらず共通とする。
 
 ---
 
-### 16.4 Supply
+### 16.4 Requestなし
 
-Supplyモードでは、Fluid Portへ流入した流体をDimensional Storageへ吸収する。
+Request流体が指定されていない場合、Fluid Portへ流入した流体をDimensional Storageへ吸収する。
 
 処理周期は原則として、
 
@@ -771,9 +790,9 @@ Dimensional Storageへ保存した数量とfluidboxから削除した数量は�
 
 ---
 
-### 16.5 Request
+### 16.5 Requestあり
 
-Requestモードでは、一つのFluid Portにつき一種類の流体を指定する。
+Fluid Portでは、一つのFluid Portにつき一種類の流体を指定する。
 
 複数種類の流体を同一Fluid Portから同時に出力してはならない。
 
@@ -806,7 +825,13 @@ Dimensional Storage：
 → Dimensional Storage：0
 ```
 
-新たな流体がSupply PortからDimensional Storageへ追加された場合、以後の更新で再び補充する。
+新たな流体がRequestなしFluid PortなどからDimensional Storageへ追加された場合、以後の更新で再び補充する。
+
+Request流体と同じ流体が外部から流入した場合、その流体はDimensional Storageへ一度送らず、Fluid Port内のバッファとしてそのまま利用する。
+
+異なる種類の流体をMOD側で混在させる機能は実装しない。
+
+異種流体の接続・混合防止については、可能な限りFactorio本来のfluid systemの制約を利用し、MOD独自の毎tick監視は追加しない。
 
 同一流体を複数のRequest Fluid Portが要求しており、すべてのPortの不足量を満たすだけのDimensional Storage在庫が存在しない場合、利用可能な流体を各Portの不足量を上限として可能な限り均等に配分する。
 
@@ -902,8 +927,8 @@ UPS負荷を考慮し、すべての処理を毎tick実行することを前提�
 
 対象：
 
-* Supply Portの吸収
-* Request Portの補充
+* RequestなしPortの吸収
+* RequestありPortの補充
 * Fluid Portの入出力
 
 ただし、実際の性能測定によって更新方式を変更できるものとする。
@@ -934,7 +959,7 @@ Dimensional Storage内数量
 * Request
 * Request変更
 * Request解除
-* モード変更
+* 旧モードstateからの移行
 * Port採掘
 * Port破壊
 * Entity削除
@@ -964,8 +989,8 @@ Dimensional Portは、通常空間とは異なる共有された異次元空間�
 
 この性質を、
 
-* Supply：30 tickごとに内部在庫を全吸収
-* Request：30 tickごとに各要求アイテムを最大5スタックまで維持
+* Requestなし：30 tickごとに内部在庫を全吸収
+* Requestあり：30 tickごとに各要求アイテムを最大5スタックまで維持
 
 というゲーム上の挙動として表現する。
 
@@ -977,11 +1002,11 @@ Dimensional Portは、通常空間とは異なる共有された異次元空間�
 
 * 単一のグローバルDimensional Storage
 * Item Port
-* Supply / Requestモード切替
-* Supplyによるアイテム吸収
+* 双方向Port
+* RequestなしPortによるアイテム吸収
 * Requestによる複数アイテム指定
 * 各要求アイテム5スタック維持
-* 複数Request Port間の公平配分
+* 複数Request指定Port間の公平配分
 * Quality対応
 * Request変更時の在庫返却
 * Port撤去・破壊時の安全な在庫処理

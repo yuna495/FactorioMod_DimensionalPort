@@ -1,10 +1,13 @@
 local names = require("prototypes.names")
 
 local UPDATE_INTERVAL = 30
-local MAX_ITEM_REQUESTS = 9
+local MAX_ITEM_REQUESTS = 8
 local REQUEST_STACKS = 5
+local REFILL_THRESHOLD_STACKS = 4
+local REQUEST_BUFFER_SLOTS = MAX_ITEM_REQUESTS * REQUEST_STACKS
+local INGRESS_BUFFER_START = REQUEST_BUFFER_SLOTS + 1
+local STORAGE_LIST_COLUMNS = 10
 local FLUID_PORT_CAPACITY = 25000
-local DEFAULT_MODE = "supply"
 local NORMAL_QUALITY = "normal"
 local TRANSLATION_KIND_ITEM = "item"
 local TRANSLATION_KIND_FLUID = "fluid"
@@ -25,10 +28,20 @@ local function ensure_storage()
 end
 
 local function quality_name(quality)
+  if quality == nil then
+    return NORMAL_QUALITY
+  end
+  if type(quality) == "string" then
+    return quality
+  end
   if type(quality) == "table" then
     return quality.name or NORMAL_QUALITY
   end
-  return quality or NORMAL_QUALITY
+  local ok, name = pcall(function() return quality.name end)
+  if ok and type(name) == "string" and name ~= "" then
+    return name
+  end
+  return NORMAL_QUALITY
 end
 
 local function item_key(name, quality)
@@ -111,6 +124,105 @@ local function inventory_count(inventory, name, quality)
   return inventory.get_item_count({name = name, quality = quality_name(quality)})
 end
 
+local function stack_matches(stack, name, quality)
+  return stack and stack.valid_for_read and stack.name == name and quality_name(stack.quality) == quality_name(quality)
+end
+
+local function request_slot_range(index)
+  local first = ((index - 1) * REQUEST_STACKS) + 1
+  return first, math.min(first + REQUEST_STACKS - 1, REQUEST_BUFFER_SLOTS)
+end
+
+local function count_item_in_slots(inventory, first_slot, last_slot, name, quality)
+  if not (inventory and inventory.valid) then return 0 end
+  local count = 0
+  for slot = first_slot, math.min(last_slot, #inventory) do
+    local stack = inventory[slot]
+    if stack_matches(stack, name, quality) then
+      count = count + stack.count
+    end
+  end
+  return count
+end
+
+local function remove_item_from_slots(inventory, first_slot, last_slot, name, quality, count)
+  if not (inventory and inventory.valid) then return 0 end
+  local remaining = count
+  local removed = 0
+  for slot = first_slot, math.min(last_slot, #inventory) do
+    if remaining <= 0 then break end
+    local stack = inventory[slot]
+    if stack_matches(stack, name, quality) then
+      local amount = math.min(stack.count, remaining)
+      stack.count = stack.count - amount
+      remaining = remaining - amount
+      removed = removed + amount
+    end
+  end
+  return removed
+end
+
+local function insert_item_into_slots(inventory, first_slot, last_slot, name, quality, count)
+  if not (inventory and inventory.valid) then return 0 end
+  local prototype = prototypes.item[name]
+  if not (prototype and quality_is_available(quality)) then return 0 end
+  local stack_size = prototype.stack_size
+  local remaining = count
+  for pass = 1, 2 do
+    for slot = first_slot, math.min(last_slot, #inventory) do
+      if remaining <= 0 then return count end
+      local stack = inventory[slot]
+      local can_insert = (pass == 1 and stack_matches(stack, name, quality)) or (pass == 2 and stack and not stack.valid_for_read)
+      if can_insert then
+        local before = stack.valid_for_read and stack.count or 0
+        local amount = math.min(remaining, stack_size - before)
+        if amount > 0 then
+          if stack.valid_for_read then
+            stack.count = stack.count + amount
+          elseif stack.set_stack(stack_definition(name, quality, amount)) then
+            amount = stack_matches(stack, name, quality) and stack.count or 0
+          else
+            amount = 0
+          end
+        end
+        local after = stack.valid_for_read and stack.count or 0
+        remaining = remaining - math.max(0, after - before)
+      end
+    end
+  end
+  return count - remaining
+end
+
+local function return_slot_range_to_storage(inventory, first_slot, last_slot)
+  if not (inventory and inventory.valid) then return {} end
+  local returned = {}
+  for slot = first_slot, math.min(last_slot, #inventory) do
+    local stack = inventory[slot]
+    if stack and stack.valid_for_read then
+      local name = stack.name
+      local quality = quality_name(stack.quality)
+      local count = stack.count
+      stack.count = 0
+      add_item_to_storage(name, quality, count)
+      local key = item_key(name, quality)
+      returned[key] = (returned[key] or 0) + count
+    end
+  end
+  return returned
+end
+
+local function request_buffer_count(inventory, request_index, request)
+  if not item_request_is_available(request) then return 0 end
+  local first_slot, last_slot = request_slot_range(request_index)
+  return count_item_in_slots(inventory, first_slot, last_slot, request.name, request.quality)
+end
+
+local function request_refill_threshold(request)
+  local prototype = prototypes.item[request.name]
+  if not prototype then return 0 end
+  return prototype.stack_size * REFILL_THRESHOLD_STACKS
+end
+
 local function clear_inventory_filters(inventory)
   if not (inventory and inventory.valid and inventory.supports_filters and inventory.supports_filters()) then
     return
@@ -124,17 +236,18 @@ local function apply_request_filters(port)
   local inventory = get_main_inventory(port.entity)
   if not inventory then return end
   clear_inventory_filters(inventory)
-  if port.mode ~= "request" then return end
 
   if inventory.supports_filters and inventory.supports_filters() then
-    local slot = 1
     for index = 1, MAX_ITEM_REQUESTS do
       local request = port.requests and port.requests[index]
       if item_request_is_available(request) then
-        for _ = 1, REQUEST_STACKS do
+        local first_slot, last_slot = request_slot_range(index)
+        for slot = first_slot, last_slot do
           if slot <= #inventory then
-            inventory.set_filter(slot, {name = request.name, quality = quality_name(request.quality)})
-            slot = slot + 1
+            local stack = inventory[slot]
+            if not (stack and stack.valid_for_read) or stack_matches(stack, request.name, request.quality) then
+              inventory.set_filter(slot, {name = request.name, quality = quality_name(request.quality)})
+            end
           end
         end
       end
@@ -153,46 +266,115 @@ local function absorb_inventory_to_storage(entity)
   end
 end
 
-local function return_unrequested_items(port)
-  local inventory = get_main_inventory(port.entity)
-  if not inventory then return end
-  port.materialized = port.materialized or {}
-  local requested = {}
+local target_count_for_request
+
+local function request_for_item(port, name, quality)
   for index = 1, MAX_ITEM_REQUESTS do
     local request = port.requests and port.requests[index]
-    if item_request_is_available(request) then
-      requested[item_key(request.name, request.quality)] = true
+    if item_request_is_available(request) and request.name == name and quality_name(request.quality) == quality_name(quality) then
+      return request, index
     end
   end
-  local contents = inventory.get_contents()
-  local actual_counts = {}
-  for _, stack in pairs(contents) do
-    local quality = quality_name(stack.quality)
-    local key = item_key(stack.name, quality)
-    actual_counts[key] = stack.count
-    if not requested[key] then
-      local removed = inventory.remove(stack_definition(stack.name, quality, stack.count))
-      add_item_to_storage(stack.name, quality, removed)
-      port.materialized[key] = nil
+  return nil, nil
+end
+
+local function move_ingress_stack_to_request_buffer(port, inventory, stack, slot)
+  local quality = quality_name(stack.quality)
+  local request, request_index = request_for_item(port, stack.name, quality)
+  if not request then return 0 end
+
+  local target = target_count_for_request(request)
+  local current = request_buffer_count(inventory, request_index, request)
+  local space = target - current
+  if space <= 0 then return 0 end
+
+  local amount = math.min(stack.count, space)
+  local first_slot, last_slot = request_slot_range(request_index)
+  local inserted = insert_item_into_slots(inventory, first_slot, last_slot, stack.name, quality, amount)
+  if inserted > 0 then
+    local ingress_stack = inventory[slot]
+    if stack_matches(ingress_stack, stack.name, quality) then
+      ingress_stack.count = ingress_stack.count - inserted
     else
-      local materialized = port.materialized[key] or 0
-      if stack.count > materialized then
-        local excess = stack.count - materialized
-        local removed = inventory.remove(stack_definition(stack.name, quality, excess))
-        add_item_to_storage(stack.name, quality, removed)
-      elseif stack.count < materialized then
-        port.materialized[key] = stack.count > 0 and stack.count or nil
-      end
+      inventory.remove(stack_definition(stack.name, quality, inserted))
     end
   end
+  return inserted
+end
+
+local function process_request_buffers(port)
+  local inventory = get_main_inventory(port.entity)
+  if not inventory then return {} end
+  port.materialized = port.materialized or {}
+  local actual_counts = {}
+
+  for index = 1, MAX_ITEM_REQUESTS do
+    local request = port.requests and port.requests[index]
+    local first_slot, last_slot = request_slot_range(index)
+    if item_request_is_available(request) then
+      local key = item_key(request.name, request.quality)
+      local target = target_count_for_request(request)
+      local request_count = 0
+      for slot = first_slot, math.min(last_slot, #inventory) do
+        local stack = inventory[slot]
+        if stack and stack.valid_for_read then
+          local quality = quality_name(stack.quality)
+          if stack.name == request.name and quality == quality_name(request.quality) then
+            request_count = request_count + stack.count
+          else
+            local removed_count = stack.count
+            local removed_name = stack.name
+            local removed_quality = quality
+            stack.count = 0
+            add_item_to_storage(removed_name, removed_quality, removed_count)
+          end
+        end
+      end
+      if request_count > target then
+        local excess = request_count - target
+        local removed = remove_item_from_slots(inventory, first_slot, last_slot, request.name, request.quality, excess)
+        add_item_to_storage(request.name, request.quality, removed)
+        request_count = request_count - removed
+      end
+      actual_counts[key] = request_count
+    else
+      return_slot_range_to_storage(inventory, first_slot, last_slot)
+    end
+  end
+
   for key in pairs(port.materialized) do
     if not actual_counts[key] then
       port.materialized[key] = nil
     end
   end
+  for key, count in pairs(actual_counts) do
+    port.materialized[key] = count > 0 and count or nil
+  end
+
+  return actual_counts
 end
 
-local function target_count_for_request(request)
+local function process_ingress_buffer(port)
+  local inventory = get_main_inventory(port.entity)
+  if not inventory then return end
+
+  for slot = INGRESS_BUFFER_START, #inventory do
+    local stack = inventory[slot]
+    if stack and stack.valid_for_read then
+      local name = stack.name
+      local quality = quality_name(stack.quality)
+      move_ingress_stack_to_request_buffer(port, inventory, stack, slot)
+      local remaining_stack = inventory[slot]
+      if stack_matches(remaining_stack, name, quality) then
+        local count = remaining_stack.count
+        remaining_stack.count = 0
+        add_item_to_storage(name, quality, count)
+      end
+    end
+  end
+end
+
+target_count_for_request = function(request)
   local prototype = prototypes.item[request.name]
   if not prototype then return 0 end
   return prototype.stack_size * REQUEST_STACKS
@@ -209,19 +391,51 @@ local function normalise_fluid_materialized(materialized, request)
   return {name = request, amount = 0}
 end
 
+local function migrate_removed_item_requests(port, old_max_requests)
+  local inventory = get_main_inventory(port.entity)
+  for index = MAX_ITEM_REQUESTS + 1, old_max_requests do
+    local request = port.requests and port.requests[index]
+    if request then
+      local key = item_key(request.name, request.quality)
+      if inventory and item_request_is_available(request) then
+        local first_slot = ((index - 1) * REQUEST_STACKS) + 1
+        local last_slot = math.min(first_slot + REQUEST_STACKS - 1, #inventory)
+        local count = count_item_in_slots(inventory, first_slot, last_slot, request.name, request.quality)
+        if count > 0 then
+          local removed = remove_item_from_slots(inventory, first_slot, last_slot, request.name, request.quality, count)
+          add_item_to_storage(request.name, request.quality, removed)
+        end
+      elseif port.materialized and port.materialized[key] and port.materialized[key] > 0 then
+        add_item_to_storage(request.name, request.quality, port.materialized[key])
+      end
+      if port.materialized then port.materialized[key] = nil end
+      port.requests[index] = nil
+    end
+  end
+end
+
 local function normalise_item_port_state(port, entity)
   port = port or {}
   port.entity = entity
-  port.mode = port.mode or DEFAULT_MODE
   port.requests = port.requests or {}
   port.materialized = port.materialized or {}
+  if port.mode == "supply" then
+    port.requests = {}
+    port.materialized = {}
+  else
+    migrate_removed_item_requests(port, 9)
+  end
+  port.mode = nil
   return port
 end
 
 local function normalise_fluid_port_state(port, entity)
   port = port or {}
   port.entity = entity
-  port.mode = port.mode or DEFAULT_MODE
+  if port.mode == "supply" then
+    port.request = nil
+  end
+  port.mode = nil
   port.materialized = normalise_fluid_materialized(port.materialized, port.request)
   return port
 end
@@ -257,6 +471,15 @@ local function return_materialized_items_to_storage(port)
   port.materialized = {}
 end
 
+local function return_orphan_materialized_items_to_storage(port)
+  for key, count in pairs(port.materialized or {}) do
+    local name, quality = split_item_key(key)
+    if count and count > 0 and not (prototypes.item[name] and quality_is_available(quality)) then
+      add_item_to_storage(name, quality, count)
+    end
+  end
+end
+
 local function return_materialized_fluid_to_storage(port)
   port.materialized = normalise_fluid_materialized(port.materialized, port.request)
   if port.materialized.name and port.materialized.amount and port.materialized.amount > 0 then
@@ -285,26 +508,22 @@ local function unregister_item_port(entity)
   local port = storage.item_ports[entity.unit_number]
   if not port then return end
   local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
-  if port.mode == "request" then
-    absorb_inventory_to_storage(entity)
-  end
+  return_orphan_materialized_items_to_storage(port)
+  absorb_inventory_to_storage(entity)
+  port.materialized = {}
   clear_destroy_registration(port)
   storage.item_ports[entity.unit_number] = nil
-  if port.mode == "request" then
-    rebalance_item_request_keys(affected_keys)
-  end
+  rebalance_item_request_keys(affected_keys)
 end
 
 local function unregister_fluid_port(entity)
   if not (entity and entity.valid) then return end
   local port = storage.fluid_ports[entity.unit_number]
   if not port then return end
-  if port.mode == "request" then
-    local fluid = entity.fluidbox and entity.fluidbox[1]
-    if fluid_is_temperature_safe(fluid) then
-      add_fluid_to_storage(fluid.name, fluid.amount)
-      entity.fluidbox[1] = nil
-    end
+  local fluid = entity.fluidbox and entity.fluidbox[1]
+  if fluid_is_temperature_safe(fluid) then
+    add_fluid_to_storage(fluid.name, fluid.amount)
+    entity.fluidbox[1] = nil
   end
   clear_destroy_registration(port)
   storage.fluid_ports[entity.unit_number] = nil
@@ -312,20 +531,14 @@ end
 
 local function unregister_lost_item_port(unit_number, port)
   local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
-  if port.mode == "request" then
-    return_materialized_items_to_storage(port)
-  end
+  return_materialized_items_to_storage(port)
   clear_destroy_registration(port)
   storage.item_ports[unit_number] = nil
-  if port.mode == "request" then
-    rebalance_item_request_keys(affected_keys)
-  end
+  rebalance_item_request_keys(affected_keys)
 end
 
 local function unregister_lost_fluid_port(unit_number, port)
-  if port.mode == "request" then
-    return_materialized_fluid_to_storage(port)
-  end
+  return_materialized_fluid_to_storage(port)
   clear_destroy_registration(port)
   storage.fluid_ports[unit_number] = nil
 end
@@ -434,20 +647,14 @@ local function on_registered_object_destroyed(event)
     local port = storage.item_ports[registration.unit_number]
     if port then
       local affected_keys = item_port_request_keys and item_port_request_keys(port) or {}
-      if port.mode == "request" then
-        return_materialized_items_to_storage(port)
-      end
+      return_materialized_items_to_storage(port)
       storage.item_ports[registration.unit_number] = nil
-      if port.mode == "request" then
-        rebalance_item_request_keys(affected_keys)
-      end
+      rebalance_item_request_keys(affected_keys)
     end
   elseif registration.port_type == "fluid" then
     local port = storage.fluid_ports[registration.unit_number]
     if port then
-      if port.mode == "request" then
-        return_materialized_fluid_to_storage(port)
-      end
+      return_materialized_fluid_to_storage(port)
       storage.fluid_ports[registration.unit_number] = nil
     end
   end
@@ -580,10 +787,20 @@ local function sync_materialized_item_count(port, key)
     return 0
   end
 
-  local actual = inventory_count(inventory, name, quality)
+  local actual = 0
+  for index = 1, MAX_ITEM_REQUESTS do
+    local request = port.requests and port.requests[index]
+    if item_request_is_available(request) and item_key(request.name, request.quality) == key then
+      local first_slot, last_slot = request_slot_range(index)
+      actual = actual + count_item_in_slots(inventory, first_slot, last_slot, name, quality)
+    end
+  end
   if actual < materialized then
     materialized = actual
     port.materialized[key] = materialized > 0 and materialized or nil
+  elseif actual > materialized then
+    materialized = actual
+    port.materialized[key] = materialized
   end
   return materialized
 end
@@ -594,7 +811,7 @@ local function collect_item_rebalance_requesters(key)
 
   local requesters = {}
   for _, port in pairs(storage.item_ports) do
-    if port.entity and port.entity.valid and port.mode == "request" and item_port_requests_key(port, key) then
+    if port.entity and port.entity.valid and item_port_requests_key(port, key) then
       local inventory = get_main_inventory(port.entity)
       if inventory then
         requesters[#requesters + 1] = {
@@ -648,7 +865,15 @@ local function rebalance_item_request_key(key)
     local desired = allocations[requester.unit_number] or 0
     if requester.current > desired then
       local excess = requester.current - desired
-      local removed = requester.inventory.remove(stack_definition(requester.name, requester.quality, excess))
+      local removed = 0
+      for index = 1, MAX_ITEM_REQUESTS do
+        local port_request = requester.port.requests and requester.port.requests[index]
+        if item_request_is_available(port_request) and item_key(port_request.name, port_request.quality) == key then
+          local first_slot, last_slot = request_slot_range(index)
+          removed = remove_item_from_slots(requester.inventory, first_slot, last_slot, requester.name, requester.quality, excess)
+          break
+        end
+      end
       if removed > 0 then
         add_item_to_storage(requester.name, requester.quality, removed)
         requester.current = requester.current - removed
@@ -663,7 +888,15 @@ local function rebalance_item_request_key(key)
       local needed = desired - requester.current
       local removed = remove_item_from_storage(requester.name, requester.quality, needed)
       if removed > 0 then
-        local inserted = requester.inventory.insert(stack_definition(requester.name, requester.quality, removed))
+        local inserted = 0
+        for index = 1, MAX_ITEM_REQUESTS do
+          local port_request = requester.port.requests and requester.port.requests[index]
+          if item_request_is_available(port_request) and item_key(port_request.name, port_request.quality) == key then
+            local first_slot, last_slot = request_slot_range(index)
+            inserted = insert_item_into_slots(requester.inventory, first_slot, last_slot, requester.name, requester.quality, removed)
+            break
+          end
+        end
         if inserted > 0 then
           requester.current = requester.current + inserted
           requester.port.materialized[key] = (requester.port.materialized[key] or 0) + inserted
@@ -686,24 +919,29 @@ local function process_item_ports()
   for unit_number, port in pairs(storage.item_ports) do
     if not (port.entity and port.entity.valid) then
       unregister_lost_item_port(unit_number, port)
-    elseif port.mode == "supply" then
+    elseif not next(item_port_request_keys(port)) then
+      return_orphan_materialized_items_to_storage(port)
       absorb_inventory_to_storage(port.entity)
-    elseif port.mode == "request" then
-      return_unrequested_items(port)
+      port.materialized = {}
+      apply_request_filters(port)
+    else
+      process_request_buffers(port)
+      process_ingress_buffer(port)
+      process_request_buffers(port)
     end
   end
 
   local grouped = {}
   for _, port in pairs(storage.item_ports) do
-    if port.entity and port.entity.valid and port.mode == "request" then
+    if port.entity and port.entity.valid then
       local inventory = get_main_inventory(port.entity)
       if inventory then
         for index = 1, MAX_ITEM_REQUESTS do
           local request = port.requests and port.requests[index]
           if item_request_is_available(request) then
             local target = target_count_for_request(request)
-            local current = inventory_count(inventory, request.name, request.quality)
-            local missing = target - current
+            local current = request_buffer_count(inventory, index, request)
+            local missing = current < request_refill_threshold(request) and (target - current) or 0
             if missing > 0 then
               local key = item_key(request.name, request.quality)
               grouped[key] = grouped[key] or {}
@@ -729,7 +967,15 @@ local function process_item_ports()
         local inventory = get_main_inventory(request.port.entity)
         if inventory then
           local removed = remove_item_from_storage(request.name, request.quality, request.assigned)
-          local inserted = inventory.insert(stack_definition(request.name, request.quality, removed))
+          local inserted = 0
+          for index = 1, MAX_ITEM_REQUESTS do
+            local port_request = request.port.requests and request.port.requests[index]
+            if item_request_is_available(port_request) and port_request.name == request.name and quality_name(port_request.quality) == quality_name(request.quality) then
+              local first_slot, last_slot = request_slot_range(index)
+              inserted = insert_item_into_slots(inventory, first_slot, last_slot, request.name, request.quality, removed)
+              break
+            end
+          end
           if inserted > 0 then
             local key = item_key(request.name, request.quality)
             request.port.materialized = request.port.materialized or {}
@@ -779,7 +1025,7 @@ local function return_unrequested_fluid(port)
   end
   if not fluid_is_temperature_safe(fluid) then return end
 
-  if port.mode ~= "request" or fluid.name ~= port.request then
+  if not fluid_is_available(port.request) or fluid.name ~= port.request then
     add_fluid_to_storage(fluid.name, fluid.amount)
     port.entity.fluidbox[1] = nil
     port.materialized = {name = port.request, amount = 0}
@@ -790,33 +1036,28 @@ local function return_unrequested_fluid(port)
     port.materialized = {name = fluid.name, amount = 0}
   end
 
-  if fluid.amount > port.materialized.amount then
-    local excess = fluid.amount - port.materialized.amount
-    add_fluid_to_storage(fluid.name, excess)
-    set_fluidbox_content(port.entity, fluid.name, port.materialized.amount)
-  elseif fluid.amount < port.materialized.amount then
-    port.materialized.amount = fluid.amount
-  end
+  port.materialized.amount = fluid.amount
 end
 
 local function process_fluid_ports()
   for unit_number, port in pairs(storage.fluid_ports) do
     if not (port.entity and port.entity.valid) then
       unregister_lost_fluid_port(unit_number, port)
-    elseif port.mode == "supply" then
+    elseif not fluid_is_available(port.request) then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
       if fluid_is_temperature_safe(fluid) then
         add_fluid_to_storage(fluid.name, fluid.amount)
         port.entity.fluidbox[1] = nil
       end
-    elseif port.mode == "request" then
+      port.materialized = {name = nil, amount = 0}
+    else
       return_unrequested_fluid(port)
     end
   end
 
   local grouped = {}
   for _, port in pairs(storage.fluid_ports) do
-    if port.entity and port.entity.valid and port.mode == "request" and fluid_is_available(port.request) then
+    if port.entity and port.entity.valid and fluid_is_available(port.request) then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
       local current = 0
       if fluid and fluid.name == port.request and fluid_is_temperature_safe(fluid) then
@@ -921,26 +1162,9 @@ local function destroy_gui(player)
   end
 end
 
-local function add_mode_buttons(parent, port)
-  local flow = parent.add{type = "flow", direction = "horizontal"}
-  flow.add{
-    type = "button",
-    name = "dimensional_port_supply_mode",
-    caption = {"dimensional-port.mode-supply"},
-    tags = {action = "mode", mode = "supply"}
-  }
-  flow.add{
-    type = "button",
-    name = "dimensional_port_request_mode",
-    caption = {"dimensional-port.mode-request"},
-    tags = {action = "mode", mode = "request"}
-  }
-  flow.add{type = "label", caption = {"dimensional-port.current-mode", {"dimensional-port.mode-" .. port.mode}}}
-end
-
 local function add_item_requests(parent, port)
   local request_frame = parent.add{type = "frame", direction = "vertical", caption = {"dimensional-port.request-items"}}
-  local request_table = request_frame.add{type = "table", column_count = 9}
+  local request_table = request_frame.add{type = "table", column_count = MAX_ITEM_REQUESTS}
   for index = 1, MAX_ITEM_REQUESTS do
     local request = item_request_is_available(port.requests[index]) and port.requests[index] or nil
     request_table.add{
@@ -1126,7 +1350,7 @@ local function rebuild_storage_table(parent, player, entries, signature)
   local table_element = scroll_pane.add{
     type = "table",
     name = "dimensional_port_storage_table",
-    column_count = 9
+    column_count = STORAGE_LIST_COLUMNS
   }
 
   for index, entry in ipairs(entries) do
@@ -1244,13 +1468,10 @@ local function build_gui(player, port, port_type)
     style = "frame_action_button",
     tags = {action = "close"}
   }
-  add_mode_buttons(frame, port)
-  if port.mode == "request" then
-    if port_type == "item" then
-      add_item_requests(frame, port)
-    else
-      add_fluid_request(frame, port)
-    end
+  if port_type == "item" then
+    add_item_requests(frame, port)
+  else
+    add_fluid_request(frame, port)
   end
   add_storage_list(frame, player, state.search)
   player.opened = frame
@@ -1262,36 +1483,6 @@ local function refresh_gui(player)
     build_gui(player, port, port_type)
   else
     destroy_gui(player)
-  end
-end
-
-local function set_item_port_mode(port, mode)
-  if port.mode == mode then return end
-  local affected_keys = port.mode == "request" and item_port_request_keys(port) or {}
-  absorb_inventory_to_storage(port.entity)
-  port.mode = mode
-  if mode == "supply" then
-    port.requests = {}
-    port.materialized = {}
-  else
-    port.requests = port.requests or {}
-    port.materialized = port.materialized or {}
-  end
-  apply_request_filters(port)
-  if mode == "supply" then
-    rebalance_item_request_keys(affected_keys)
-  end
-end
-
-local function set_fluid_port_mode(port, mode)
-  if port.mode == mode then return end
-  if not return_fluidbox_to_storage(port) then return end
-  port.mode = mode
-  if mode == "supply" then
-    port.request = nil
-    port.materialized = {name = nil, amount = 0}
-  else
-    port.materialized = {name = port.request, amount = 0}
   end
 end
 
@@ -1325,14 +1516,18 @@ local function set_item_request(port, index, selection, affected_keys)
 
   if old then
     affected_keys[old_key] = true
+  end
+
+  local inventory = get_main_inventory(port.entity)
+  local first_slot, last_slot = request_slot_range(index)
+  local returned = inventory and return_slot_range_to_storage(inventory, first_slot, last_slot) or {}
+
+  if old then
     if item_request_is_available(old) then
-      local inventory = get_main_inventory(port.entity)
-      if inventory then
-        local count = inventory_count(inventory, old.name, old.quality)
-        if count > 0 then
-          local removed = inventory.remove(stack_definition(old.name, old.quality, count))
-          add_item_to_storage(old.name, old.quality, removed)
-        end
+      local materialized = port.materialized[old_key] or 0
+      local observed = returned[old_key] or 0
+      if materialized > observed and not inventory then
+        add_item_to_storage(old.name, old.quality, materialized)
       end
     elseif port.materialized[old_key] and port.materialized[old_key] > 0 then
       add_item_to_storage(old.name, old.quality, port.materialized[old_key])
@@ -1362,8 +1557,6 @@ local function set_item_request(port, index, selection, affected_keys)
 end
 
 local function add_storage_entry_to_request(player, port, port_type, tags)
-  if port.mode ~= "request" then return false end
-
   if port_type == "item" then
     if tags.kind ~= "item" then return false end
     local name, quality = normalize_item_request{name = tags.name, quality = tags.quality}
@@ -1481,14 +1674,7 @@ script.on_event(defines.events.on_gui_click, function(event)
   end
   local port, port_type = get_open_port(player)
   if not (port and port.entity and port.entity.valid) then return end
-  if tags.action == "mode" then
-    if port_type == "item" then
-      set_item_port_mode(port, tags.mode)
-    else
-      set_fluid_port_mode(port, tags.mode)
-    end
-    refresh_gui(player)
-  elseif tags.action == "clear-search" then
+  if tags.action == "clear-search" then
     local state = player_state(player.index)
     state.search = ""
     local search = element.parent and element.parent.valid and element.parent.dimensional_port_search
