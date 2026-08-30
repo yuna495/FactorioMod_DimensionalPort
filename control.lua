@@ -7,11 +7,51 @@ local REFILL_THRESHOLD_STACKS = 4
 local REQUEST_BUFFER_SLOTS = MAX_ITEM_REQUESTS * REQUEST_STACKS
 local STORAGE_LIST_COLUMNS = 10
 local FLUID_PORT_CAPACITY = 25000
+local FLUID_STORAGE_TEMPERATURE_VERSION = 1
 local NORMAL_QUALITY = "normal"
 local TRANSLATION_KIND_ITEM = "item"
 local TRANSLATION_KIND_FLUID = "fluid"
 local STORAGE_ENTRY_PREFIX = "dimensional_port_storage_entry_"
 local STORAGE_SIGNATURE_SEPARATOR = "\31"
+
+local migrate_fluid_storage_temperature
+
+local function fluid_default_temperature(name)
+  local prototype = prototypes.fluid and prototypes.fluid[name]
+  return prototype and prototype.default_temperature
+end
+
+local function normalise_fluid_temperature(name, temperature)
+  if type(temperature) == "number" then
+    return temperature
+  end
+  return fluid_default_temperature(name)
+end
+
+local function fluid_storage_amount(entry)
+  if type(entry) == "table" then
+    return entry.amount or 0
+  elseif type(entry) == "number" then
+    return entry
+  end
+  return 0
+end
+
+local function fluid_storage_temperature(name, entry)
+  if type(entry) == "table" then
+    return normalise_fluid_temperature(name, entry.temperature)
+  end
+  return normalise_fluid_temperature(name, nil)
+end
+
+local function normalise_fluid_storage_entry(name, entry)
+  local amount = fluid_storage_amount(entry)
+  if amount <= 0 then return nil end
+  return {
+    amount = amount,
+    temperature = fluid_storage_temperature(name, entry)
+  }
+end
 
 local function ensure_storage()
   storage.dimensional_storage = storage.dimensional_storage or {items = {}, fluids = {}}
@@ -24,6 +64,9 @@ local function ensure_storage()
   storage.distribution_offsets = storage.distribution_offsets or {items = {}, fluids = {}}
   storage.distribution_offsets.items = storage.distribution_offsets.items or {}
   storage.distribution_offsets.fluids = storage.distribution_offsets.fluids or {}
+  if storage.fluid_temperature_storage_version ~= FLUID_STORAGE_TEMPERATURE_VERSION and migrate_fluid_storage_temperature then
+    migrate_fluid_storage_temperature()
+  end
 end
 
 local function quality_name(quality)
@@ -85,28 +128,51 @@ local function remove_item_from_storage(name, quality, count)
   return removed
 end
 
-local function add_fluid_to_storage(name, amount)
+local function add_fluid_to_storage(name, amount, temperature)
   if amount <= 0 then return end
   local key = fluid_key(name)
-  storage.dimensional_storage.fluids[key] = (storage.dimensional_storage.fluids[key] or 0) + amount
+  local entry = normalise_fluid_storage_entry(name, storage.dimensional_storage.fluids[key])
+  local added_temperature = normalise_fluid_temperature(name, temperature)
+  if not entry then
+    storage.dimensional_storage.fluids[key] = {amount = amount, temperature = added_temperature}
+    return
+  end
+
+  local existing_amount = entry.amount
+  local new_amount = existing_amount + amount
+  if type(entry.temperature) == "number" and type(added_temperature) == "number" then
+    entry.temperature = ((existing_amount * entry.temperature) + (amount * added_temperature)) / new_amount
+  elseif type(added_temperature) == "number" then
+    entry.temperature = added_temperature
+  end
+  entry.amount = new_amount
+  storage.dimensional_storage.fluids[key] = entry
 end
 
 local function remove_fluid_from_storage(name, amount)
   local key = fluid_key(name)
-  local available = storage.dimensional_storage.fluids[key] or 0
+  local entry = normalise_fluid_storage_entry(name, storage.dimensional_storage.fluids[key])
+  local available = entry and entry.amount or 0
   local removed = math.min(available, amount)
-  if removed <= 0 then return 0 end
+  if removed <= 0 then return 0, entry and entry.temperature or nil end
   local remaining = available - removed
-  storage.dimensional_storage.fluids[key] = remaining > 0 and remaining or nil
-  return removed
+  if remaining > 0 then
+    entry.amount = remaining
+    storage.dimensional_storage.fluids[key] = entry
+  else
+    storage.dimensional_storage.fluids[key] = nil
+  end
+  return removed, entry.temperature
 end
 
-local function fluid_is_temperature_safe(fluid)
-  if not (fluid and fluid.name and fluid.amount and fluid.amount > 0) then return false end
-  if fluid.temperature == nil then return true end
-  local prototype = prototypes.fluid[fluid.name]
-  local default_temperature = prototype and prototype.default_temperature
-  return default_temperature ~= nil and math.abs(fluid.temperature - default_temperature) < 0.001
+local function fluid_is_storable(fluid)
+  return fluid and fluid.name and fluid.amount and fluid.amount > 0 and fluid_is_available(fluid.name)
+end
+
+local function add_fluid_stack_to_storage(fluid)
+  if not fluid_is_storable(fluid) then return false end
+  add_fluid_to_storage(fluid.name, fluid.amount, fluid.temperature)
+  return true
 end
 
 local function get_main_inventory(entity)
@@ -395,15 +461,45 @@ target_count_for_request = function(request)
   return prototype.stack_size * REQUEST_STACKS
 end
 
-local function normalise_fluid_materialized(materialized, request)
+local function normalise_fluid_materialized(materialized, request, observed_fluid)
+  if fluid_is_storable(observed_fluid) then
+    return {
+      name = observed_fluid.name,
+      amount = observed_fluid.amount,
+      temperature = normalise_fluid_temperature(observed_fluid.name, observed_fluid.temperature)
+    }
+  end
+
   if type(materialized) == "table" then
     materialized.amount = materialized.amount or 0
     materialized.name = materialized.name or request
+    materialized.temperature = normalise_fluid_temperature(materialized.name, materialized.temperature)
     return materialized
   elseif type(materialized) == "number" then
-    return {name = request, amount = materialized}
+    return {
+      name = request,
+      amount = materialized,
+      temperature = normalise_fluid_temperature(request, nil)
+    }
   end
-  return {name = request, amount = 0}
+  return {
+    name = request,
+    amount = 0,
+    temperature = normalise_fluid_temperature(request, nil)
+  }
+end
+
+migrate_fluid_storage_temperature = function()
+  for name, entry in pairs(storage.dimensional_storage.fluids or {}) do
+    storage.dimensional_storage.fluids[name] = normalise_fluid_storage_entry(name, entry)
+  end
+
+  for _, port in pairs(storage.fluid_ports or {}) do
+    local fluid = port.entity and port.entity.valid and port.entity.fluidbox and port.entity.fluidbox[1] or nil
+    port.materialized = normalise_fluid_materialized(port.materialized, port.request, fluid)
+  end
+
+  storage.fluid_temperature_storage_version = FLUID_STORAGE_TEMPERATURE_VERSION
 end
 
 local function migrate_removed_item_requests(port, old_max_requests)
@@ -451,7 +547,8 @@ local function normalise_fluid_port_state(port, entity)
     port.request = nil
   end
   port.mode = nil
-  port.materialized = normalise_fluid_materialized(port.materialized, port.request)
+  local fluid = entity and entity.valid and entity.fluidbox and entity.fluidbox[1] or nil
+  port.materialized = normalise_fluid_materialized(port.materialized, port.request, fluid)
   return port
 end
 
@@ -498,9 +595,9 @@ end
 local function return_materialized_fluid_to_storage(port)
   port.materialized = normalise_fluid_materialized(port.materialized, port.request)
   if port.materialized.name and port.materialized.amount and port.materialized.amount > 0 then
-    add_fluid_to_storage(port.materialized.name, port.materialized.amount)
+    add_fluid_to_storage(port.materialized.name, port.materialized.amount, port.materialized.temperature)
   end
-  port.materialized = {name = port.request, amount = 0}
+  port.materialized = {name = port.request, amount = 0, temperature = normalise_fluid_temperature(port.request, nil)}
 end
 
 local function set_fluidbox_filter(entity, fluid)
@@ -551,8 +648,7 @@ local function unregister_fluid_port(entity)
   if not port then return end
   set_fluidbox_filter(entity, nil)
   local fluid = entity.fluidbox and entity.fluidbox[1]
-  if fluid_is_temperature_safe(fluid) then
-    add_fluid_to_storage(fluid.name, fluid.amount)
+  if add_fluid_stack_to_storage(fluid) then
     entity.fluidbox[1] = nil
   end
   clear_destroy_registration(port)
@@ -1022,9 +1118,9 @@ local function process_item_ports()
   end
 end
 
-local function set_fluidbox_content(entity, name, amount)
+local function set_fluidbox_content(entity, name, amount, temperature)
   if amount and amount > 0 then
-    entity.fluidbox[1] = {name = name, amount = amount}
+    entity.fluidbox[1] = {name = name, amount = amount, temperature = normalise_fluid_temperature(name, temperature)}
   else
     entity.fluidbox[1] = nil
   end
@@ -1037,12 +1133,12 @@ local function return_fluidbox_to_storage(port)
     port.materialized = normalise_fluid_materialized(port.materialized, port.request)
     port.materialized.amount = 0
     port.materialized.name = port.request
+    port.materialized.temperature = normalise_fluid_temperature(port.request, nil)
     return true
   end
-  if not fluid_is_temperature_safe(fluid) then return false end
-  add_fluid_to_storage(fluid.name, fluid.amount)
+  if not add_fluid_stack_to_storage(fluid) then return false end
   port.entity.fluidbox[1] = nil
-  port.materialized = {name = port.request, amount = 0}
+  port.materialized = {name = port.request, amount = 0, temperature = normalise_fluid_temperature(port.request, nil)}
   return true
 end
 
@@ -1057,11 +1153,10 @@ local function clear_mismatched_fluid_request(port)
   end
 
   port.request = nil
-  port.materialized = {name = nil, amount = 0}
+  port.materialized = {name = nil, amount = 0, temperature = nil}
   apply_fluid_request_filter(port)
 
-  if fluid_is_temperature_safe(fluid) then
-    add_fluid_to_storage(fluid.name, fluid.amount)
+  if add_fluid_stack_to_storage(fluid) then
     port.entity.fluidbox[1] = nil
   end
 
@@ -1075,6 +1170,7 @@ local function return_unrequested_fluid(port)
   if not (fluid and fluid.name and fluid.amount and fluid.amount > 0) then
     port.materialized.amount = 0
     port.materialized.name = port.request
+    port.materialized.temperature = normalise_fluid_temperature(port.request, nil)
     return
   end
 
@@ -1082,21 +1178,20 @@ local function return_unrequested_fluid(port)
     return
   end
 
-  if not fluid_is_temperature_safe(fluid) then return end
-
   if not fluid_is_available(port.request) then
-    add_fluid_to_storage(fluid.name, fluid.amount)
+    add_fluid_stack_to_storage(fluid)
     port.entity.fluidbox[1] = nil
-    port.materialized = {name = nil, amount = 0}
+    port.materialized = {name = nil, amount = 0, temperature = nil}
     apply_fluid_request_filter(port)
     return
   end
 
   if port.materialized.name ~= fluid.name then
-    port.materialized = {name = fluid.name, amount = 0}
+    port.materialized = {name = fluid.name, amount = 0, temperature = normalise_fluid_temperature(fluid.name, fluid.temperature)}
   end
 
   port.materialized.amount = fluid.amount
+  port.materialized.temperature = normalise_fluid_temperature(fluid.name, fluid.temperature)
 end
 
 local function process_fluid_ports()
@@ -1108,11 +1203,10 @@ local function process_fluid_ports()
       changed_requests[unit_number] = true
     elseif not fluid_is_available(port.request) then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
-      if fluid_is_temperature_safe(fluid) then
-        add_fluid_to_storage(fluid.name, fluid.amount)
+      if add_fluid_stack_to_storage(fluid) then
         port.entity.fluidbox[1] = nil
       end
-      port.materialized = {name = nil, amount = 0}
+      port.materialized = {name = nil, amount = 0, temperature = nil}
     else
       return_unrequested_fluid(port)
     end
@@ -1123,7 +1217,7 @@ local function process_fluid_ports()
     if port.entity and port.entity.valid and fluid_is_available(port.request) then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
       local current = 0
-      if fluid and fluid.name == port.request and fluid_is_temperature_safe(fluid) then
+      if fluid and fluid.name == port.request then
         current = fluid.amount
       elseif fluid and fluid.amount and fluid.amount > 0 then
         current = FLUID_PORT_CAPACITY
@@ -1144,18 +1238,24 @@ local function process_fluid_ports()
   end
 
   for key, requests in pairs(grouped) do
-    distribute_fluid_amount(storage.dimensional_storage.fluids[key] or 0, requests)
+    local storage_entry = normalise_fluid_storage_entry(key, storage.dimensional_storage.fluids[key])
+    distribute_fluid_amount(storage_entry and storage_entry.amount or 0, requests)
     for _, request in ipairs(requests) do
       if request.assigned > 0 then
-        local removed = remove_fluid_from_storage(request.name, request.assigned)
-        local inserted = request.port.entity.insert_fluid{name = request.name, amount = removed}
-        if inserted > 0 then
-          request.port.materialized = normalise_fluid_materialized(request.port.materialized, request.name)
-          request.port.materialized.name = request.name
-          request.port.materialized.amount = request.port.materialized.amount + inserted
-        end
-        if inserted < removed then
-          add_fluid_to_storage(request.name, removed - inserted)
+        local removed, temperature = remove_fluid_from_storage(request.name, request.assigned)
+        if removed > 0 then
+          local inserted = request.port.entity.insert_fluid{
+            name = request.name,
+            amount = removed,
+            temperature = normalise_fluid_temperature(request.name, temperature)
+          }
+          if inserted > 0 then
+            local fluid = request.port.entity.fluidbox and request.port.entity.fluidbox[1]
+            request.port.materialized = normalise_fluid_materialized(request.port.materialized, request.name, fluid)
+          end
+          if inserted < removed then
+            add_fluid_to_storage(request.name, removed - inserted, temperature)
+          end
         end
       end
     end
@@ -1306,6 +1406,13 @@ local function quality_localised_name(quality)
   return (quality_prototype and quality_prototype.localised_name) or name
 end
 
+local function format_temperature(temperature)
+  if type(temperature) == "number" then
+    return string.format("%.1f", temperature)
+  end
+  return "?"
+end
+
 local function storage_entry_element_name(index)
   return STORAGE_ENTRY_PREFIX .. index
 end
@@ -1358,7 +1465,9 @@ local function collect_storage_entries(player, search)
     end
   end
 
-  for name, amount in pairs(storage.dimensional_storage.fluids) do
+  for name, stored_fluid in pairs(storage.dimensional_storage.fluids) do
+    local fluid_entry = normalise_fluid_storage_entry(name, stored_fluid)
+    local amount = fluid_entry and fluid_entry.amount or 0
     if amount > 0 then
       local prototype = prototypes.fluid[name]
       if prototype then
@@ -1371,7 +1480,7 @@ local function collect_storage_entries(player, search)
             name = name,
             amount = amount,
             sprite = "fluid/" .. name,
-            tooltip = {"dimensional-port.fluid-tooltip", local_name, amount},
+            tooltip = {"dimensional-port.fluid-tooltip", local_name, amount, format_temperature(fluid_entry.temperature)},
             sort_parts = prototype_sort_parts(prototype),
             quality_level = 0
           }
@@ -1559,7 +1668,11 @@ local function set_fluid_request(port, selection)
   if port.request == new_request then return end
   if not return_fluidbox_to_storage(port) then return end
   port.request = new_request
-  port.materialized = {name = new_request, amount = 0}
+  port.materialized = {
+    name = new_request,
+    amount = 0,
+    temperature = normalise_fluid_temperature(new_request, nil)
+  }
   apply_fluid_request_filter(port)
 end
 

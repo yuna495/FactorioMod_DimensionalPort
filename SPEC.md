@@ -37,7 +37,7 @@ storage.dimensional_storage = {
     },
 
     fluids = {
-        -- 流体および必要な属性を含めて管理
+        -- Fluid Prototypeごとにamountとtemperatureを管理
     }
 }
 ```
@@ -738,6 +738,27 @@ GUI表示中に必要な対象だけを翻訳・キャッシュし、毎tick全p
 
 流体についてもItem Portと同様にDimensional Storageへ数量として保存する。
 
+Fluid StorageはFluid Prototypeごとに一つのエントリを持ち、数量と温度を以下の形式で保持する。
+
+```lua
+storage.dimensional_storage.fluids[fluid_name] = {
+    amount = amount,
+    temperature = temperature
+}
+```
+
+同一Fluid Prototypeの温度違いは、温度ごとに別Storageエントリへ分割しない。
+
+同一Fluid Prototypeへ異なる温度の流体を追加する場合は、既存在庫量と追加量による加重平均でStorage温度を更新する。
+
+```text
+new_temperature = (old_amount * old_temperature + added_amount * added_temperature) / (old_amount + added_amount)
+```
+
+Storageから一部の流体を取り出す場合、取り出した流体はStorageに記録されているtemperatureを持つものとして扱い、残ったStorageエントリのtemperatureは変化しない。
+
+Fluid Prototype名が異なる流体は、ローカライズ名、用途、温度帯が似ていても統合してはならない。
+
 Fluid Portは一つのEntity Prototypeを使用する。
 
 Fluid PortはSupply / Requestの手動モード切替を持たない。
@@ -747,6 +768,8 @@ Request流体が指定されていない場合、流入した流体を30 tickご
 Request流体が指定されている場合、その流体用の双方向Portとして動作し、外部から流入した同一流体をそのまま利用しながら、不足分をDimensional Storageから補充する。
 
 Request流体が指定されているFluid Portは指定流体専用とし、指定流体以外を受け入れない。
+
+RequestはFluid Prototype単位で行い、温度違いだけを理由にRequestを解除してはならない。
 
 ただし、Fluid Portが空で、Dimensional StorageにもRequest流体が存在しない場合など、Factorioの流体システム上、別流体が実fluidboxへ流入する可能性がある。
 
@@ -802,6 +825,10 @@ Request流体が指定されていない場合、Fluid Portへ流入した流体
 
 処理時点でFluid Portのfluidboxに存在する流体を、数量にかかわらず可能な限りすべてDimensional Storageへ移動する。
 
+吸収時は、実fluidboxから取得したFluid Prototype名、amount、temperatureをStorageへ保存する。
+
+同一Fluid Prototypeが既にStorageに存在する場合、amountを合算し、temperatureは加重平均で更新する。
+
 吸収後、その数量をFluid Portのfluidboxから削除する。
 
 Dimensional Storageへ保存した数量とfluidboxから削除した数量は必ず一致させ、流体の複製または消失を発生させてはならない。
@@ -834,6 +861,10 @@ Requestを変更する場合は、現在のfluidbox内容を安全にDimensional
 
 30 tickごとに、指定流体についてfluidboxの不足量を計算し、最大容量である25,000まで維持する。
 
+Dimensional StorageからFluid Portへ補充する場合は、Storageエントリに記録されているtemperatureをFluidテーブルへ含めて投入する。
+
+補充後は、実fluidboxのamountおよびtemperatureを正として`materialized` stateへ同期する。
+
 例：
 
 ```text
@@ -865,6 +896,8 @@ Dimensional Storage：
 
 Request流体と同じ流体が外部から流入した場合、その流体はDimensional Storageへ一度送らず、Fluid Port内のバッファとしてそのまま利用する。
 
+Request流体と同じFluid Prototypeで温度だけが異なる流体がPort内に存在する場合は、Requestを維持し、Port内の混合挙動はFactorio本来のfluidboxおよび`insert_fluid`の挙動に従う。
+
 異なる種類の流体をMOD側で混在させる機能は実装しない。
 
 異種流体の接続・混合防止については、可能な限りFactorio本来のfluid systemの制約を利用し、MOD独自の毎tick監視は追加しない。
@@ -877,15 +910,35 @@ Entityの処理順によって、先に処理されたFluid Portだけが在庫�
 
 ## 17. 流体温度
 
-温度が異なる同一流体については、将来的には異なる状態として扱うことを基本方針とする。
+Dimensional Storageは流体温度を正式に扱う。
 
-ただし、温度付き流体の具体的な保存方式、取り出し方式およびGUI仕様は現時点では未確定である。
+実fluidboxから取得したFluid Prototype名、amount、temperatureを保存対象とし、default temperatureと異なることを理由に保存を拒否してはならない。
 
-初回実装では、温度差を持つ流体の完全な保存・復元対応は実装対象外とする。
+temperatureが取得できない場合は、該当Fluid Prototypeの`default_temperature`を使用して正規化する。
 
-温度依存流体について不正確な温度変換、意図しない混合、流体生成が発生する可能性がある場合、その流体を安全に処理できない状態として扱い、推測による変換処理を実装してはならない。
+同一Fluid Prototypeの異温度流体をStorageへ追加する場合は、amountを合算し、temperatureを加重平均する。
 
-温度付き流体への正式対応は、Factorio 2.0のFluid APIおよび実際のゲーム挙動を確認したうえで別途仕様を確定する。
+Storageから流体を取り出す場合は、Storageに記録されているtemperatureを使用する。
+
+Fluid Portの`materialized` stateにも、可能な限り以下の形式で流体名、数量、温度を保持する。
+
+```lua
+port.materialized = {
+    name = fluid_name,
+    amount = amount,
+    temperature = temperature
+}
+```
+
+通常運用中は実fluidboxを正として、`materialized`のname、amount、temperatureを同期する。
+
+通常の撤去・破壊、Request変更・解除など、実fluidboxを参照できる場合は、実fluidbox内の流体を実温度のままStorageへ返却する。
+
+事前削除イベントを通らずEntityが失われ、実fluidboxを参照できない場合は、`materialized` stateに記録されたname、amount、temperatureを使って可能な限りStorageへ復元する。
+
+既存セーブで`storage.dimensional_storage.fluids[name] = amount`として保存されている流体は、Fluid Prototypeが存在する場合、そのPrototypeの`default_temperature`をtemperatureとして持つ新形式へ移行する。
+
+旧`materialized` stateがtemperatureを持たない場合も、実Entityのfluidboxが参照できるときは実fluidboxのtemperatureを優先し、参照できない場合はFluid Prototypeの`default_temperature`で移行する。
 
 ---
 
