@@ -1045,6 +1045,28 @@ local function return_fluidbox_to_storage(port)
   return true
 end
 
+local function clear_mismatched_fluid_request(port)
+  if not (port and fluid_is_available(port.request) and port.entity and port.entity.valid and port.entity.fluidbox) then
+    return false
+  end
+
+  local fluid = port.entity.fluidbox[1]
+  if not (fluid and fluid.name and fluid.amount and fluid.amount > 0 and fluid.name ~= port.request) then
+    return false
+  end
+
+  port.request = nil
+  port.materialized = {name = nil, amount = 0}
+  apply_fluid_request_filter(port)
+
+  if fluid_is_temperature_safe(fluid) then
+    add_fluid_to_storage(fluid.name, fluid.amount)
+    port.entity.fluidbox[1] = nil
+  end
+
+  return true
+end
+
 local function return_unrequested_fluid(port)
   if not (port.entity and port.entity.valid and port.entity.fluidbox) then return end
   port.materialized = normalise_fluid_materialized(port.materialized, port.request)
@@ -1054,12 +1076,17 @@ local function return_unrequested_fluid(port)
     port.materialized.name = port.request
     return
   end
+
+  if clear_mismatched_fluid_request(port) then
+    return
+  end
+
   if not fluid_is_temperature_safe(fluid) then return end
 
-  if not fluid_is_available(port.request) or fluid.name ~= port.request then
+  if not fluid_is_available(port.request) then
     add_fluid_to_storage(fluid.name, fluid.amount)
     port.entity.fluidbox[1] = nil
-    port.materialized = {name = port.request, amount = 0}
+    port.materialized = {name = nil, amount = 0}
     apply_fluid_request_filter(port)
     return
   end
@@ -1072,9 +1099,12 @@ local function return_unrequested_fluid(port)
 end
 
 local function process_fluid_ports()
+  local changed_requests = {}
   for unit_number, port in pairs(storage.fluid_ports) do
     if not (port.entity and port.entity.valid) then
       unregister_lost_fluid_port(unit_number, port)
+    elseif clear_mismatched_fluid_request(port) then
+      changed_requests[unit_number] = true
     elseif not fluid_is_available(port.request) then
       local fluid = port.entity.fluidbox and port.entity.fluidbox[1]
       if fluid_is_temperature_safe(fluid) then
@@ -1129,6 +1159,8 @@ local function process_fluid_ports()
       end
     end
   end
+
+  return changed_requests
 end
 
 local function player_state(player_index)
@@ -1663,9 +1695,14 @@ end
 script.on_nth_tick(UPDATE_INTERVAL, function()
   ensure_storage()
   process_item_ports()
-  process_fluid_ports()
+  local changed_fluid_requests = process_fluid_ports()
   for _, player in pairs(game.connected_players) do
-    refresh_storage_list(player)
+    local state = storage.players and storage.players[player.index]
+    if state and state.port_type == "fluid" and changed_fluid_requests[state.unit_number] then
+      refresh_gui(player)
+    else
+      refresh_storage_list(player)
+    end
   end
 end)
 

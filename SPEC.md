@@ -748,6 +748,12 @@ Request流体が指定されている場合、その流体用の双方向Portと
 
 Request流体が指定されているFluid Portは指定流体専用とし、指定流体以外を受け入れない。
 
+ただし、Fluid Portが空で、Dimensional StorageにもRequest流体が存在しない場合など、Factorioの流体システム上、別流体が実fluidboxへ流入する可能性がある。
+
+Request中に実fluidboxへRequest流体と異なる流体が流入した場合、そのFluid PortのRequestは自動的に解除する。
+
+自動解除後、そのFluid PortはRequestなしPortとして動作する。
+
 ---
 
 ### 16.2 Entityサイズ・外観
@@ -810,7 +816,17 @@ Fluid Portでは、一つのFluid Portにつき一種類の流体を指定する
 
 Request流体が指定されている場合、Fluid PortはFactorio 2.0 Runtime APIの`LuaFluidBox::set_filter(index, filter)`を使用し、fluidboxのfilterを指定流体に設定する。
 
-これにより、異種流体を30 tick後に検出してStorageへ送るのではなく、指定流体以外がPortへ流入しないようにする。
+このfilterは異種流体流入を抑制するための補助として使用する。
+
+fluidbox filterだけで異種流体の流入を完全に防げない場合があるため、Request中に実fluidbox内の流体がRequest流体と異なることを検出した場合、そのRequestを自動解除する。
+
+自動解除時は、旧Request由来の`materialized` stateをDimensional Storageへ加算せず、実fluidboxの内容を正として扱う。
+
+実fluidbox内の流体が安全に扱える場合は、RequestなしPortとしてその流体のみをDimensional Storageへ吸収し、fluidboxを空にする。
+
+自動解除した30 tick更新では、旧Request流体を補充対象に含めてはならない。
+
+Fluid PortのGUIを開いているプレイヤーがいる場合、Request表示は自動解除に追従して空欄へ更新する。
 
 Requestを解除した場合はfluidbox filterを解除し、再び任意の安全に扱える流体を吸収できるようにする。
 
