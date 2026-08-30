@@ -1099,7 +1099,13 @@ local function add_storage_entry(parent, entry, index)
     sprite = entry.sprite,
     number = entry.amount,
     tooltip = entry.tooltip,
-    style = "slot_button"
+    style = "slot_button",
+    tags = {
+      action = "storage-entry",
+      kind = entry.kind,
+      name = entry.name,
+      quality = entry.quality
+    }
   }
   if entry.kind == "item" and entry.quality ~= NORMAL_QUALITY then
     icon.quality = entry.quality
@@ -1355,6 +1361,43 @@ local function set_item_request(port, index, selection, affected_keys)
   end
 end
 
+local function add_storage_entry_to_request(player, port, port_type, tags)
+  if port.mode ~= "request" then return false end
+
+  if port_type == "item" then
+    if tags.kind ~= "item" then return false end
+    local name, quality = normalize_item_request{name = tags.name, quality = tags.quality}
+    if not name then return false end
+    port.requests = port.requests or {}
+
+    for index = 1, MAX_ITEM_REQUESTS do
+      local request = port.requests[index]
+      if item_request_is_available(request) and request.name == name and quality_name(request.quality) == quality then
+        return false
+      end
+    end
+
+    for index = 1, MAX_ITEM_REQUESTS do
+      if not port.requests[index] then
+        set_item_request(port, index, {name = name, quality = quality})
+        refresh_gui(player)
+        return true
+      end
+    end
+
+    return false
+  end
+
+  if port_type == "fluid" then
+    if tags.kind ~= "fluid" or not fluid_is_available(tags.name) then return false end
+    set_fluid_request(port, tags.name)
+    refresh_gui(player)
+    return true
+  end
+
+  return false
+end
+
 script.on_init(function()
   ensure_storage()
   rebuild_ports()
@@ -1451,6 +1494,9 @@ script.on_event(defines.events.on_gui_click, function(event)
     local search = element.parent and element.parent.valid and element.parent.dimensional_port_search
     if search then search.text = "" end
     refresh_storage_list(player, true)
+  elseif tags.action == "storage-entry" then
+    if event.button and event.button ~= defines.mouse_button_type.left then return end
+    add_storage_entry_to_request(player, port, port_type, tags)
   end
 end)
 
