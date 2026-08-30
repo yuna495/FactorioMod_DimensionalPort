@@ -1222,7 +1222,10 @@ local function destroy_gui(player)
   local root = player.gui.screen.dimensional_port_frame
   if root then root.destroy() end
   if storage.players and storage.players[player.index] then
-    storage.players[player.index].storage_gui = {signature = "", dirty = true}
+    local state = storage.players[player.index]
+    state.port_type = nil
+    state.unit_number = nil
+    state.storage_gui = {signature = "", dirty = true}
   end
 end
 
@@ -1698,7 +1701,8 @@ script.on_nth_tick(UPDATE_INTERVAL, function()
   local changed_fluid_requests = process_fluid_ports()
   for _, player in pairs(game.connected_players) do
     local state = storage.players and storage.players[player.index]
-    if state and state.port_type == "fluid" and changed_fluid_requests[state.unit_number] then
+    local frame = player.gui.screen.dimensional_port_frame
+    if frame and state and state.port_type == "fluid" and changed_fluid_requests[state.unit_number] then
       refresh_gui(player)
     else
       refresh_storage_list(player)
