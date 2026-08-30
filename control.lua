@@ -5,7 +5,6 @@ local MAX_ITEM_REQUESTS = 8
 local REQUEST_STACKS = 5
 local REFILL_THRESHOLD_STACKS = 4
 local REQUEST_BUFFER_SLOTS = MAX_ITEM_REQUESTS * REQUEST_STACKS
-local INGRESS_BUFFER_START = REQUEST_BUFFER_SLOTS + 1
 local STORAGE_LIST_COLUMNS = 10
 local FLUID_PORT_CAPACITY = 25000
 local NORMAL_QUALITY = "normal"
@@ -131,6 +130,17 @@ end
 local function request_slot_range(index)
   local first = ((index - 1) * REQUEST_STACKS) + 1
   return first, math.min(first + REQUEST_STACKS - 1, REQUEST_BUFFER_SLOTS)
+end
+
+local function request_index_for_slot(slot)
+  if slot < 1 or slot > REQUEST_BUFFER_SLOTS then return nil end
+  return math.floor((slot - 1) / REQUEST_STACKS) + 1
+end
+
+local function slot_is_active_request_buffer(port, slot)
+  local request_index = request_index_for_slot(slot)
+  if not request_index then return false end
+  return item_request_is_available(port.requests and port.requests[request_index])
 end
 
 local function count_item_in_slots(inventory, first_slot, last_slot, name, quality)
@@ -337,13 +347,16 @@ local function process_request_buffers(port)
         request_count = request_count - removed
       end
       actual_counts[key] = request_count
-    else
-      return_slot_range_to_storage(inventory, first_slot, last_slot)
     end
   end
 
   for key in pairs(port.materialized) do
     if not actual_counts[key] then
+      local name, quality = split_item_key(key)
+      local count = port.materialized[key]
+      if count and count > 0 and not (prototypes.item[name] and quality_is_available(quality)) then
+        add_item_to_storage(name, quality, count)
+      end
       port.materialized[key] = nil
     end
   end
@@ -358,17 +371,19 @@ local function process_ingress_buffer(port)
   local inventory = get_main_inventory(port.entity)
   if not inventory then return end
 
-  for slot = INGRESS_BUFFER_START, #inventory do
-    local stack = inventory[slot]
-    if stack and stack.valid_for_read then
-      local name = stack.name
-      local quality = quality_name(stack.quality)
-      move_ingress_stack_to_request_buffer(port, inventory, stack, slot)
-      local remaining_stack = inventory[slot]
-      if stack_matches(remaining_stack, name, quality) then
-        local count = remaining_stack.count
-        remaining_stack.count = 0
-        add_item_to_storage(name, quality, count)
+  for slot = 1, #inventory do
+    if not slot_is_active_request_buffer(port, slot) then
+      local stack = inventory[slot]
+      if stack and stack.valid_for_read then
+        local name = stack.name
+        local quality = quality_name(stack.quality)
+        move_ingress_stack_to_request_buffer(port, inventory, stack, slot)
+        local remaining_stack = inventory[slot]
+        if stack_matches(remaining_stack, name, quality) then
+          local count = remaining_stack.count
+          remaining_stack.count = 0
+          add_item_to_storage(name, quality, count)
+        end
       end
     end
   end
@@ -488,6 +503,19 @@ local function return_materialized_fluid_to_storage(port)
   port.materialized = {name = port.request, amount = 0}
 end
 
+local function set_fluidbox_filter(entity, fluid)
+  if not (entity and entity.valid and entity.fluidbox) then return false end
+  local filter = fluid_is_available(fluid) and fluid or nil
+  local call_ok, result = pcall(function() return entity.fluidbox.set_filter(1, filter) end)
+  return call_ok and result ~= false
+end
+
+local function apply_fluid_request_filter(port)
+  if not (port and port.entity and port.entity.valid) then return false end
+  local filter = fluid_is_available(port.request) and port.request or nil
+  return set_fluidbox_filter(port.entity, filter)
+end
+
 local function register_item_port(entity)
   if not (entity and entity.valid) then return end
   local port = normalise_item_port_state(storage.item_ports[entity.unit_number], entity)
@@ -501,6 +529,7 @@ local function register_fluid_port(entity)
   local port = normalise_fluid_port_state(storage.fluid_ports[entity.unit_number], entity)
   storage.fluid_ports[entity.unit_number] = port
   register_destroy_watch(port, entity, "fluid")
+  apply_fluid_request_filter(port)
 end
 
 local function unregister_item_port(entity)
@@ -520,6 +549,7 @@ local function unregister_fluid_port(entity)
   if not (entity and entity.valid) then return end
   local port = storage.fluid_ports[entity.unit_number]
   if not port then return end
+  set_fluidbox_filter(entity, nil)
   local fluid = entity.fluidbox and entity.fluidbox[1]
   if fluid_is_temperature_safe(fluid) then
     add_fluid_to_storage(fluid.name, fluid.amount)
@@ -560,6 +590,7 @@ local function rebuild_ports()
       local port = normalise_fluid_port_state(previous_fluid_ports[entity.unit_number], entity)
       rebuilt_fluid_ports[entity.unit_number] = port
       register_destroy_watch(port, entity, "fluid")
+      apply_fluid_request_filter(port)
     end
   end
 
@@ -1029,6 +1060,7 @@ local function return_unrequested_fluid(port)
     add_fluid_to_storage(fluid.name, fluid.amount)
     port.entity.fluidbox[1] = nil
     port.materialized = {name = port.request, amount = 0}
+    apply_fluid_request_filter(port)
     return
   end
 
@@ -1492,6 +1524,7 @@ local function set_fluid_request(port, selection)
   if not return_fluidbox_to_storage(port) then return end
   port.request = new_request
   port.materialized = {name = new_request, amount = 0}
+  apply_fluid_request_filter(port)
 end
 
 local function normalize_item_request(selection)

@@ -100,14 +100,18 @@ Item Portの内部Inventoryサイズは、通常の鋼鉄チェストと同等�
 
 初期実装では、vanillaの鋼鉄チェストに準拠したInventory容量を使用する。
 
-このInventoryは、Request BufferとIngress Bufferに分けて使用する。
+このInventoryは、Request BufferとIngress相当の一時投入領域に分けて使用する。
 
 * slots 1～40: Request Buffer
-* slots 41～48: Ingress Buffer
+* slots 41～48: 常時Ingress領域
 
 Request Bufferは、最大8種類のRequestに対して各5スロットずつ割り当てる。
 
-Ingress Bufferは、外部から投入された任意のアイテムを一時的に受け入れ、30 tick更新時にRequest BufferまたはDimensional Storageへ移動する。
+Requestが設定されている5スロット領域だけを正式なRequest Bufferとして扱う。
+
+Requestが設定されていない5スロット領域は、物理的にはslots 1～40内であっても、処理上はIngress相当の一時投入領域として扱う。
+
+現在有効なRequestに割り当てられていないすべてのslotは、外部から投入された任意のアイテムを一時的に受け入れ、30 tick更新時にRequest BufferまたはDimensional Storageへ移動する。
 
 Dimensional StorageそのものをItem PortのInventoryへ保持してはならない
 
@@ -131,7 +135,7 @@ Item Portの投入処理は原則として、**30 tickごと**に処理する。
 
 Requestが存在しない場合、処理時点でPort内部Inventoryに存在するアイテムをすべてDimensional Storageへ移動する。
 
-Requestが存在する場合、Ingress Buffer内のアイテムを確認し、対応するRequest Bufferに空きがある要求対象アイテムはRequest Bufferへ移動する。
+Requestが存在する場合、現在有効なRequestに割り当てられていないすべてのslotにあるアイテムを確認し、対応するRequest Bufferに空きがある要求対象アイテムはRequest Bufferへ移動する。
 
 Request Bufferへ入りきらない分、およびRequest対象外アイテムはDimensional Storageへ送る。
 
@@ -159,11 +163,17 @@ Item Port
 
 ---
 
-### 4.3 Ingress Buffer
+### 4.3 Ingress相当領域
 
-Ingress Bufferはslots 41～48の8スロットとする。
+slots 41～48は常時Ingress領域とする。
 
-Ingress BufferにはInventory filterを設定しない。
+常時Ingress領域にはInventory filterを設定しない。
+
+slots 1～40内でRequestが設定されていない5スロット単位の領域も、処理上はIngress相当として扱う。
+
+Ingress相当領域にはInventory filterを設定しない。
+
+Request設定を追加または変更した場合、そのRequestに割り当てられる5スロット内に既存アイテムが存在する可能性があるため、物資をDimensional Storageへ退避してから新しいfilterを適用する。
 
 外部から投入されたアイテムがRequest対象であり、対応Request Bufferに空きがある場合、そのアイテムはDimensional Storageへ一度送らずにRequest Bufferへ移動する。
 
@@ -203,7 +213,7 @@ Item Portの内部Inventoryは48スロットであり、各要求アイテムに
 
 をRequest Bufferとして使用する。
 
-残り8スロットはIngress Bufferとして使用し、要求アイテム数の追加には使用しない。
+slots 41～48の8スロットは常時Ingress領域として使用し、要求アイテム数の追加には使用しない。
 
 要求アイテム数が8種類を超える設定は許可しない。
 
@@ -251,7 +261,7 @@ Request Bufferに割り当てられた各5スロットには、対応するア�
 
 要求スロットが空の場合、その5スロットのInventory filterは解除する。
 
-Ingress BufferにはInventory filterを設定しない。
+Ingress相当領域にはInventory filterを設定しない。
 
 要求対象外のアイテムによってRequest Bufferが占有された場合、30 tick更新時にDimensional Storageへ返却し、各要求アイテムの5スタック維持を妨げ続けないようにする。
 
@@ -267,7 +277,7 @@ Request Buffer内のアイテムは、Portからインサータ、ローダー�
 
 再配分対象として扱う数量は、Port内部Inventory内の全数量ではなく、`materialized` stateに記録され、かつ実Inventory内に存在している数量に限る。
 
-Ingress Buffer内にある未処理アイテムは、共有キャッシュとして扱わない。
+Ingress相当領域内にある未処理アイテムは、共有キャッシュとして扱わない。
 
 ---
 
@@ -540,7 +550,7 @@ Supply / Requestの手動モード切替は廃止する。
 
 Dimensional Portが撤去・破壊された場合、内部Inventoryまたはfluidboxに残っている内容物を安全に処理する。
 
-通常の事前削除イベントでEntity内部のInventoryまたはfluidboxを参照できる場合、Request BufferおよびIngress Buffer内のアイテム、またはfluidbox内の安全に扱える流体をDimensional Storageへ返却する。
+通常の事前削除イベントでEntity内部のInventoryまたはfluidboxを参照できる場合、Request BufferおよびIngress相当領域内のアイテム、またはfluidbox内の安全に扱える流体をDimensional Storageへ返却する。
 
 Portの撤去・破壊によってアイテムまたは流体の複製・不当な消失が発生してはならない。
 
@@ -548,7 +558,7 @@ Portの撤去・破壊によってアイテムまたは流体の複製・不当�
 
 通常の事前削除イベントを通らずPort Entityが無効化された場合でも、永続stateに記録されたRequest Buffer内の共有キャッシュ数量をDimensional Storageへ返却し、総量保存則を可能な限り維持する。
 
-ただしEntity消滅後に実Inventoryを参照できない場合、Ingress Buffer内の未処理アイテムや、前回同期後に外部から投入された未同期アイテムはMOD側で正確に復元できない。
+ただしEntity消滅後に実Inventoryを参照できない場合、Ingress相当領域内の未処理アイテムや、前回同期後に外部から投入された未同期アイテムはMOD側で正確に復元できない。
 
 通常の事前削除イベントと破壊監視による後続通知で二重返却してはならない。
 
@@ -736,6 +746,8 @@ Request流体が指定されていない場合、流入した流体を30 tickご
 
 Request流体が指定されている場合、その流体用の双方向Portとして動作し、外部から流入した同一流体をそのまま利用しながら、不足分をDimensional Storageから補充する。
 
+Request流体が指定されているFluid Portは指定流体専用とし、指定流体以外を受け入れない。
+
 ---
 
 ### 16.2 Entityサイズ・外観
@@ -795,6 +807,14 @@ Dimensional Storageへ保存した数量とfluidboxから削除した数量は�
 Fluid Portでは、一つのFluid Portにつき一種類の流体を指定する。
 
 複数種類の流体を同一Fluid Portから同時に出力してはならない。
+
+Request流体が指定されている場合、Fluid PortはFactorio 2.0 Runtime APIの`LuaFluidBox::set_filter(index, filter)`を使用し、fluidboxのfilterを指定流体に設定する。
+
+これにより、異種流体を30 tick後に検出してStorageへ送るのではなく、指定流体以外がPortへ流入しないようにする。
+
+Requestを解除した場合はfluidbox filterを解除し、再び任意の安全に扱える流体を吸収できるようにする。
+
+Requestを変更する場合は、現在のfluidbox内容を安全にDimensional Storageへ返却し、fluidboxを空にしてから新しいfilterを設定する。
 
 30 tickごとに、指定流体についてfluidboxの不足量を計算し、最大容量である25,000まで維持する。
 
