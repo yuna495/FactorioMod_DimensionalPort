@@ -2,10 +2,41 @@ local names = require("prototypes.names")
 
 local item_port_icon = "__DimensionalPort__/graphics/icons/dimensional-item-port.png"
 local fluid_port_icon = "__DimensionalPort__/graphics/icons/dimensional-fluid-port.png"
+local combinator_icon = "__base__/graphics/icons/constant-combinator.png"
 local item_port_picture = "__DimensionalPort__/graphics/entity/dimensional-port.png"
 local item_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-port-shadow.png"
 local fluid_port_overlay = "__DimensionalPort__/graphics/entity/dimensional-fluid-port.png"
 local fluid_port_shadow = "__DimensionalPort__/graphics/entity/dimensional-port-shadow.png"
+
+local combinator_tint = {r = 0.72, g = 0.32, b = 1.0, a = 1.0}
+
+local function tint_sprite_definition(sprite)
+  if type(sprite) ~= "table" then return end
+
+  if sprite.layers then
+    for _, layer in pairs(sprite.layers) do
+      tint_sprite_definition(layer)
+    end
+  end
+
+  if sprite.sheets then
+    for _, sheet in pairs(sprite.sheets) do
+      tint_sprite_definition(sheet)
+    end
+  end
+
+  for _, direction in pairs({"north", "east", "south", "west"}) do
+    tint_sprite_definition(sprite[direction])
+  end
+
+  if sprite.hr_version then
+    tint_sprite_definition(sprite.hr_version)
+  end
+
+  if sprite.filename and not sprite.draw_as_shadow then
+    sprite.tint = combinator_tint
+  end
+end
 
 
 local function fluid_port_overlay_sprite()
@@ -128,11 +159,34 @@ fluid_port_item.icon = nil
 fluid_port_item.place_result = names.fluid_port_entity
 fluid_port_item.order = "a[pipe]-a[pipe]-d[dimensional-fluid-port]"
 
+local combinator = table.deepcopy(data.raw["constant-combinator"]["constant-combinator"])
+combinator.name = names.combinator_entity
+combinator.localised_name = {"entity-name.dimensional-combinator"}
+combinator.localised_description = {"entity-description.dimensional-combinator"}
+combinator.minable = {mining_time = 0.1, result = names.combinator_item}
+combinator.icons = {
+  {icon = combinator_icon, icon_size = 64, tint = combinator_tint}
+}
+combinator.icon = nil
+if combinator.sprites then tint_sprite_definition(combinator.sprites) end
+if combinator.activity_led_sprites then tint_sprite_definition(combinator.activity_led_sprites) end
+
+local combinator_item = table.deepcopy(data.raw.item["constant-combinator"])
+combinator_item.name = names.combinator_item
+combinator_item.localised_name = {"item-name.dimensional-combinator"}
+combinator_item.localised_description = {"item-description.dimensional-combinator"}
+combinator_item.icons = combinator.icons
+combinator_item.icon = nil
+combinator_item.place_result = names.combinator_entity
+combinator_item.order = "b[combinators]-d[dimensional-combinator]"
+
 data:extend({
   item_port,
   fluid_port,
+  combinator,
   item_port_item,
   fluid_port_item,
+  combinator_item,
   {
     type = "recipe",
     name = names.item_port_recipe,
@@ -146,6 +200,13 @@ data:extend({
     enabled = true,
     ingredients = {{type = "item", name = "iron-plate", amount = 5}},
     results = {{type = "item", name = names.fluid_port_item, amount = 1}}
+  },
+  {
+    type = "recipe",
+    name = names.combinator_recipe,
+    enabled = true,
+    ingredients = {{type = "item", name = "iron-plate", amount = 1}},
+    results = {{type = "item", name = names.combinator_item, amount = 1}}
   }
 })
 data:extend({
