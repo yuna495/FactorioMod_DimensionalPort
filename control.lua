@@ -618,7 +618,8 @@ local function draw_vortex(entity)
     },
     surface = entity.surface,
     x_scale = 0.14,
-    y_scale = 0.15
+    y_scale = 0.15,
+    render_layer = "object-under"
   }
 end
 
