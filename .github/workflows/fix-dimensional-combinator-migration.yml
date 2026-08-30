@@ -1,0 +1,37 @@
+name: Fix Dimensional Combinator Migration Workflow
+
+on:
+  push:
+    branches:
+      - "モード切替撤廃"
+    paths:
+      - ".github/workflows/fix-dimensional-combinator-migration.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "モード切替撤廃"
+          fetch-depth: 0
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/apply-dimensional-combinator-migration.yml')
+          t = p.read_text(encoding='utf-8')
+          old = "t = once(t, '* アイテム検索\\n', '* アイテム検索\\n* Dimensional CombinatorによるRead-Only回路出力\\n', 'SPEC scope')"
+          new = "t = t.replace('* アイテム検索\\n', '* アイテム検索\\n* Dimensional CombinatorによるRead-Only回路出力\\n', 1)"
+          if old not in t:
+              raise SystemExit('target line not found')
+          p.write_text(t.replace(old, new, 1), encoding='utf-8')
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/apply-dimensional-combinator-migration.yml
+          git commit -m "次元コンビネータ移植ワークフローの置換を修正"
+          git push origin HEAD:"モード切替撤廃"
