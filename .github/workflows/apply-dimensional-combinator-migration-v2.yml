@@ -1,0 +1,175 @@
+name: Apply Dimensional Combinator Migration v2
+
+on:
+  push:
+    branches:
+      - "モード切替撤廃"
+    paths:
+      - ".github/workflows/apply-dimensional-combinator-migration-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "モード切替撤廃"
+          fetch-depth: 0
+
+      - name: Apply migration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def once(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{label}: expected 1 exact match, found {n}")
+              return text.replace(old, new, 1)
+
+          def sub_once(text, pattern, repl, label):
+              text2, n = re.subn(pattern, repl, text, count=1, flags=re.S)
+              if n != 1:
+                  raise SystemExit(f"{label}: expected 1 regex match, found {n}")
+              return text2
+
+          p = Path("control.lua")
+          text = p.read_text(encoding="utf-8")
+
+          text = once(text,
+              'local STORAGE_SIGNATURE_SEPARATOR = "\\31"\n',
+              'local STORAGE_SIGNATURE_SEPARATOR = "\\31"\nlocal CIRCUIT_SIGNAL_MAX = 2147483647\nlocal COMBINATOR_REGISTRY_VERSION = 1\n',
+              "constants")
+
+          text = once(text,
+              '  storage.item_ports = storage.item_ports or {}\n  storage.fluid_ports = storage.fluid_ports or {}\n  storage.players = storage.players or {}\n',
+              '  storage.item_ports = storage.item_ports or {}\n  storage.fluid_ports = storage.fluid_ports or {}\n  storage.dimensional_combinators = storage.dimensional_combinators or {}\n  storage.players = storage.players or {}\n',
+              "storage registry")
+
+          text = once(text,
+              'local function unregister_item_port(entity)\n',
+              '''local function register_dimensional_combinator(entity)\n  if not (entity and entity.valid) then return end\n  local combinator = storage.dimensional_combinators[entity.unit_number] or {}\n  combinator.entity = entity\n  combinator.signature = nil\n  storage.dimensional_combinators[entity.unit_number] = combinator\n  register_destroy_watch(combinator, entity, "combinator")\nend\n\nlocal function unregister_item_port(entity)\n''',
+              "register combinator")
+
+          text = once(text,
+              'local function unregister_lost_item_port(unit_number, port)\n',
+              '''local function unregister_dimensional_combinator(entity)\n  if not (entity and entity.valid) then return end\n  local combinator = storage.dimensional_combinators[entity.unit_number]\n  if not combinator then return end\n  clear_destroy_registration(combinator)\n  storage.dimensional_combinators[entity.unit_number] = nil\nend\n\nlocal function unregister_lost_item_port(unit_number, port)\n''',
+              "unregister combinator")
+
+          text = once(text,
+              'local function rebuild_ports()\n',
+              '''local function unregister_lost_dimensional_combinator(unit_number, combinator)\n  clear_destroy_registration(combinator)\n  storage.dimensional_combinators[unit_number] = nil\nend\n\nlocal function rebuild_dimensional_combinators()\n  local previous = storage.dimensional_combinators or {}\n  local rebuilt = {}\n\n  for _, surface in pairs(game.surfaces) do\n    for _, entity in pairs(surface.find_entities_filtered{name = names.combinator_entity}) do\n      local combinator = previous[entity.unit_number] or {}\n      combinator.entity = entity\n      combinator.signature = nil\n      rebuilt[entity.unit_number] = combinator\n      register_destroy_watch(combinator, entity, "combinator")\n    end\n  end\n\n  for unit_number, combinator in pairs(previous) do\n    if not rebuilt[unit_number] then\n      unregister_lost_dimensional_combinator(unit_number, combinator)\n    end\n  end\n\n  storage.dimensional_combinators = rebuilt\n  storage.dimensional_combinator_registry_version = COMBINATOR_REGISTRY_VERSION\nend\n\nlocal function rebuild_ports()\n''',
+              "rebuild combinators")
+
+          text = sub_once(text,
+              r'(local function on_entity_created\(entity\).*?elseif entity\.name == names\.fluid_port_entity then\n    register_fluid_port\(entity\)\n    draw_vortex\(entity\)\n)(  end\nend)',
+              r'\1  elseif entity.name == names.combinator_entity then\n    register_dimensional_combinator(entity)\n\2',
+              "entity created")
+
+          text = sub_once(text,
+              r'(local function on_entity_removed\(entity\).*?elseif entity\.name == names\.fluid_port_entity then\n    unregister_fluid_port\(entity\)\n)(  end\nend)',
+              r'\1  elseif entity.name == names.combinator_entity then\n    unregister_dimensional_combinator(entity)\n\2',
+              "entity removed")
+
+          text = sub_once(text,
+              r'(local function on_entity_cloned\(event\).*?elseif entity\.name == names\.fluid_port_entity then\n    clear_cloned_fluid_port_fluidbox\(entity\)\n    register_fluid_port\(entity\)\n)(  end\nend)',
+              r'\1  elseif entity.name == names.combinator_entity then\n    register_dimensional_combinator(entity)\n\2',
+              "entity cloned")
+
+          text = sub_once(text,
+              r'(elseif registration\.port_type == "fluid" then\n    local port = storage\.fluid_ports\[registration\.unit_number\]\n    if port then\n      return_materialized_fluid_to_storage\(port\)\n      storage\.fluid_ports\[registration\.unit_number\] = nil\n    end\n)(  end\nend\n\nlocal function request_sort_less)',
+              r'\1  elseif registration.port_type == "combinator" then\n    storage.dimensional_combinators[registration.unit_number] = nil\n\2',
+              "object destroyed")
+
+          marker = 'local function add_storage_entry(parent, entry, index)\n'
+          circuit = '''local function circuit_signal_count(amount)\n  local count = math.floor(amount or 0)\n  if count <= 0 then return nil end\n  return math.min(count, CIRCUIT_SIGNAL_MAX)\nend\n\nlocal function collect_circuit_signal_entries()\n  local entries = {}\n\n  for key, count in pairs(displayed_item_counts()) do\n    local signal_count = circuit_signal_count(count)\n    if signal_count then\n      local name, quality = split_item_key(key)\n      local normalised_quality = quality_name(quality)\n      local prototype = prototypes.item[name]\n      if prototype and quality_is_available(normalised_quality) then\n        entries[#entries + 1] = {\n          kind = "item",\n          key = key,\n          signal = {type = "item", name = name, quality = normalised_quality},\n          count = signal_count,\n          sort_parts = prototype_sort_parts(prototype),\n          quality_level = quality_level(normalised_quality)\n        }\n      end\n    end\n  end\n\n  for name, stored_fluid in pairs(storage.dimensional_storage.fluids) do\n    local fluid_entry = normalise_fluid_storage_entry(name, stored_fluid)\n    local signal_count = circuit_signal_count(fluid_entry and fluid_entry.amount or 0)\n    local prototype = prototypes.fluid[name]\n    if signal_count and prototype then\n      entries[#entries + 1] = {\n        kind = "fluid",\n        key = fluid_key(name),\n        signal = {type = "fluid", name = name, quality = NORMAL_QUALITY},\n        count = signal_count,\n        sort_parts = prototype_sort_parts(prototype),\n        quality_level = 0\n      }\n    end\n  end\n\n  table.sort(entries, storage_entry_less)\n  return entries\nend\n\nlocal function circuit_signal_signature(entries)\n  local parts = {}\n  for index, entry in ipairs(entries) do\n    local signal = entry.signal\n    parts[index] = (signal.type or "item") .. ":" .. signal.name .. ":" .. (signal.quality or NORMAL_QUALITY) .. ":" .. entry.count\n  end\n  return table.concat(parts, STORAGE_SIGNATURE_SEPARATOR)\nend\n\nlocal function sync_combinator_sections(entity, entries)\n  if not (entity and entity.valid) then return false end\n  local behavior = entity.get_control_behavior()\n  if not behavior then return false end\n  behavior.enabled = true\n\n  local filters_per_section = prototypes.utility_constants.max_logistic_filter_count\n  if type(filters_per_section) ~= "number" or filters_per_section <= 0 then return false end\n  local needed_sections = math.max(1, math.ceil(#entries / filters_per_section))\n\n  while behavior.sections_count < needed_sections do\n    if not behavior.add_section() then return false end\n  end\n  while behavior.sections_count > needed_sections do\n    if not behavior.remove_section(behavior.sections_count) then return false end\n  end\n\n  for section_index = 1, needed_sections do\n    local section = behavior.get_section(section_index)\n    if not (section and section.valid and section.is_manual) then return false end\n    local filters = {}\n    local first = ((section_index - 1) * filters_per_section) + 1\n    local last = math.min(section_index * filters_per_section, #entries)\n    for entry_index = first, last do\n      local entry = entries[entry_index]\n      filters[#filters + 1] = {value = entry.signal, min = entry.count}\n    end\n    section.filters = filters\n    section.active = true\n    section.multiplier = 1\n  end\n  return true\nend\n\nlocal function sync_dimensional_combinator(combinator, entries, signature, force)\n  if not (combinator and combinator.entity and combinator.entity.valid) then return end\n  entries = entries or collect_circuit_signal_entries()\n  signature = signature or circuit_signal_signature(entries)\n  if not force and combinator.signature == signature then return end\n  if sync_combinator_sections(combinator.entity, entries) then combinator.signature = signature end\nend\n\nlocal function sync_dimensional_combinators(force)\n  if storage.dimensional_combinator_registry_version ~= COMBINATOR_REGISTRY_VERSION then\n    rebuild_dimensional_combinators()\n  end\n  local entries = collect_circuit_signal_entries()\n  local signature = circuit_signal_signature(entries)\n  for unit_number, combinator in pairs(storage.dimensional_combinators) do\n    if combinator.entity and combinator.entity.valid then\n      sync_dimensional_combinator(combinator, entries, signature, force)\n    else\n      storage.dimensional_combinators[unit_number] = nil\n    end\n  end\nend\n\n'''
+          text = once(text, marker, circuit + marker, "circuit block")
+
+          text = once(text,
+              'script.on_init(function()\n  ensure_storage()\n  rebuild_ports()\nend)\n',
+              'script.on_init(function()\n  ensure_storage()\n  rebuild_ports()\n  rebuild_dimensional_combinators()\nend)\n',
+              "on init")
+          text = once(text,
+              'script.on_configuration_changed(function()\n  ensure_storage()\n  rebuild_ports()\nend)\n',
+              'script.on_configuration_changed(function()\n  ensure_storage()\n  rebuild_ports()\n  rebuild_dimensional_combinators()\nend)\n',
+              "configuration")
+
+          text = once(text,
+              'if defines.events.on_object_destroyed then\n  script.on_event(defines.events.on_object_destroyed, on_registered_object_destroyed)\nend\n\nscript.on_nth_tick(UPDATE_INTERVAL, function()\n',
+              '''if defines.events.on_object_destroyed then\n  script.on_event(defines.events.on_object_destroyed, on_registered_object_destroyed)\nend\n\nif defines.events.on_entity_settings_pasted then\n  script.on_event(defines.events.on_entity_settings_pasted, function(event)\n    ensure_storage()\n    local entity = event.destination\n    if entity and entity.valid and entity.name == names.combinator_entity then\n      register_dimensional_combinator(entity)\n    end\n  end)\nend\n\nscript.on_nth_tick(UPDATE_INTERVAL, function()\n''',
+              "settings pasted")
+
+          text = once(text,
+              '  process_item_ports()\n  local changed_fluid_requests = process_fluid_ports()\n  for _, player in pairs(game.connected_players) do\n',
+              '  process_item_ports()\n  local changed_fluid_requests = process_fluid_ports()\n  sync_dimensional_combinators(false)\n  for _, player in pairs(game.connected_players) do\n',
+              "nth tick")
+
+          text = sub_once(text,
+              r'(script\.on_event\(defines\.events\.on_gui_opened.*?elseif entity\.name == names\.fluid_port_entity then\n    player\.opened = nil\n    local port = storage\.fluid_ports\[entity\.unit_number\]\n    if port then build_gui\(player, port, "fluid"\) end\n)(  end\nend\))',
+              r'\1  elseif entity.name == names.combinator_entity then\n    player.opened = nil\n\2',
+              "read only GUI")
+
+          for needle in ['local MAX_ITEM_REQUESTS = 8', 'local FLUID_STORAGE_TEMPERATURE_VERSION = 1', 'local function clear_mismatched_fluid_request(port)', 'render_layer = "object-under"', 'sync_dimensional_combinators(false)', 'storage.dimensional_combinators = storage.dimensional_combinators or {}']:
+              if needle not in text: raise SystemExit(f"missing invariant: {needle}")
+          if 'local DEFAULT_MODE' in text: raise SystemExit('DEFAULT_MODE reintroduced')
+          if '.filters_count' in text: raise SystemExit('filters_count misuse present')
+          p.write_text(text, encoding="utf-8")
+
+          def locale(path, item_name, item_desc):
+              p = Path(path)
+              t = p.read_text(encoding="utf-8")
+              display = '次元コンビネータ' if 'ja/' in path else 'Dimensional Combinator'
+              desc = 'Dimensional Storageの在庫を回路信号として出力します。' if 'ja/' in path else 'Outputs the contents of Dimensional Storage as circuit signals.'
+              t = once(t, f'dimensional-fluid-port={item_name}\n\n[entity-description]', f'dimensional-fluid-port={item_name}\ndimensional-combinator={display}\n\n[entity-description]', path+' entity name')
+              t = once(t, f'dimensional-fluid-port={item_desc}\n\n[item-name]', f'dimensional-fluid-port={item_desc}\ndimensional-combinator={desc}\n\n[item-name]', path+' entity desc')
+              t = once(t, f'dimensional-fluid-port={item_name}\n\n[item-description]', f'dimensional-fluid-port={item_name}\ndimensional-combinator={display}\n\n[item-description]', path+' item name')
+              t = once(t, f'dimensional-fluid-port={item_desc}\n\n[recipe-name]', f'dimensional-fluid-port={item_desc}\ndimensional-combinator={desc}\n\n[recipe-name]', path+' item desc')
+              t = once(t, f'dimensional-fluid-port={item_name}\n\n[dimensional-port]', f'dimensional-fluid-port={item_name}\ndimensional-combinator={display}\n\n[dimensional-port]', path+' recipe')
+              p.write_text(t, encoding='utf-8')
+
+          locale('locale/ja/dimensional-port.cfg', '異次元流体ポート', '共有異次元ストレージへ流体を格納し、取り出します。')
+          locale('locale/en/dimensional-port.cfg', 'Dimensional Fluid Port', 'Stores and retrieves fluids through the shared dimensional storage.')
+
+          p = Path('SPEC.md')
+          t = p.read_text(encoding='utf-8')
+          t = once(t,
+              '### 18.3 Technology\n\n初期実装では、Item PortおよびFluid Portをゲーム開始時から利用可能とする。',
+              '### 18.3 Dimensional Combinator\n\n初期開発およびテスト段階では、Dimensional CombinatorのCrafting Recipeを以下とする。\n\n```text\n鉄板 × 1\n→ Dimensional Combinator × 1\n```\n\nこのRecipeは暫定仕様である。\n\n専用Technologyは設けず、ゲーム開始時から利用可能とする。\n\n---\n\n### 18.4 Technology\n\n初期実装では、Item Port、Fluid PortおよびDimensional Combinatorをゲーム開始時から利用可能とする。',
+              'SPEC recipe')
+          t = sub_once(t,
+              r'## 19\. 回路ネットワーク\n\n.*?\n---\n\n## 20\. 更新処理とUPS',
+              '''## 19. 回路ネットワーク\n\nDimensional Storageの在庫を回路ネットワークへ出力する専用Entityとして、**Dimensional Combinator（次元コンビネータ）**を使用する。\n\nDimensional CombinatorはRead-Only専用とし、回路ネットワークからの入力によってDimensional Storage、Item Port、Fluid Port、Request設定を変更してはならない。\n\n出力対象はItem、Item + Quality、Fluidとする。ItemはGUIと同じくDimensional Storage内数量とItem Portのmaterialized共有キャッシュを合算する。Quality違いは別信号とする。FluidはDimensional Storageに存在するFluid Prototypeごとのamountを出力し、temperatureは出力しない。\n\n数量0以下は出力しない。Fluidの小数amountは回路信号化時に整数へ切り捨てる。int32上限を超える数量は2147483647へclampする。\n\n複数設置されたDimensional CombinatorはSurfaceやPlanetに関係なく同一のグローバルDimensional Storageを参照する。更新周期は30 tickとし、実在するStorageエントリのみ走査する。同一内容はsignature比較で不要な再書き込みを避ける。\n\n信号順序はGUIと同系統のPrototype順・Quality順で安定化する。一つのsectionに収まらない場合は`prototypes.utility_constants.max_logistic_filter_count`を上限として複数sectionへ分割する。`LuaLogisticSection::filters_count`は現在のfilter数であり容量ではないため、容量判定に使用しない。\n\nvanilla constant combinator由来の編集GUIは開かせず、出力内容はMOD側が管理する。\n\n---\n\n## 20. 更新処理とUPS''',
+              'SPEC circuit')
+          if '* Dimensional CombinatorによるRead-Only回路出力' not in t:
+              t = t.replace('* アイテム検索\n', '* アイテム検索\n* Dimensional CombinatorによるRead-Only回路出力\n', 1)
+          t = t.replace('回路ネットワーク対応は初回実装の必須要件に含めない。', '回路ネットワークからのRequest変更、Storage操作、条件制御は初回実装の対象外とする。')
+          t = t.replace('* 回路ネットワーク対応方式', '* 回路入力によるRequest変更、Storage操作、条件制御')
+          p.write_text(t, encoding='utf-8')
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          git diff --check
+          grep -F 'local MAX_ITEM_REQUESTS = 8' control.lua
+          grep -F 'local FLUID_STORAGE_TEMPERATURE_VERSION = 1' control.lua
+          grep -F 'sync_dimensional_combinators(false)' control.lua
+          grep -F 'dimensional-combinator=次元コンビネータ' locale/ja/dimensional-port.cfg
+          grep -F 'dimensional-combinator=Dimensional Combinator' locale/en/dimensional-port.cfg
+          ! grep -Fq 'local DEFAULT_MODE' control.lua
+          ! grep -Fq '.filters_count' control.lua
+
+      - name: Commit migration
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add control.lua SPEC.md locale/ja/dimensional-port.cfg locale/en/dimensional-port.cfg
+          git diff --cached --check
+          git commit -m "次元コンビネータの在庫出力を移植"
+          git push origin HEAD:"モード切替撤廃"
