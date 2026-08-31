@@ -77,7 +77,8 @@ local function vortex_visualisation()
             priority = "extra-high",
             width = 128,
             height = 135,
-            repeat_count = 16,
+            repeat_count = 14,
+            animation_speed = 0.125,
             shift = util.by_pixel(0, -2),
             scale = 0.3
           },
@@ -86,9 +87,8 @@ local function vortex_visualisation()
             priority = "extra-high",
             width = 128,
             height = 128,
-            frame_count = 16,
+            frame_count = 14,
             line_length = 4,
-            animation_speed = 0.15,
             shift = {0, -0.37},
             scale = 0.145
           }
