@@ -820,6 +820,14 @@ Fluid Portのfluidbox容量は、
 
 この容量はRequest流体の有無に関わらず共通とする。
 
+Request流体が指定されている場合の維持目標量は、
+
+**20,000 fluid**
+
+とする。
+
+物理容量25,000のうち、維持目標を超える5,000 fluid分は、外部配管から流入する要求流体の余剰を一時的に受け入れるための余裕として扱う。
+
 ---
 
 ### 16.4 Requestなし
@@ -868,11 +876,19 @@ Requestを解除した場合はfluidbox filterを解除し、再び任意の安�
 
 Requestを変更する場合は、現在のfluidbox内容を安全にDimensional Storageへ返却し、fluidboxを空にしてから新しいfilterを設定する。
 
-30 tickごとに、指定流体についてfluidboxの不足量を計算し、最大容量である25,000まで維持する。
+30 tickごとに、指定流体についてfluidboxの量を維持目標である20,000へ近づける。
+
+現在量が20,000未満の場合、不足量を計算し、Dimensional Storageから20,000まで補充する。
+
+現在量が20,000を超える場合、超過分を実fluidboxから取り出し、Dimensional Storageへ格納する。
+
+現在量が20,000ちょうどの場合は何もしない。
 
 Dimensional StorageからFluid Portへ補充する場合は、Storageエントリに記録されているtemperatureをFluidテーブルへ含めて投入する。
 
-補充後は、実fluidboxのamountおよびtemperatureを正として`materialized` stateへ同期する。
+超過分をDimensional Storageへ返す場合は、実fluidboxから取り出した流体のFluid Prototype名、amount、temperatureをStorageへ保存する。
+
+補充または超過返却後は、実fluidboxのamountおよびtemperatureを正として`materialized` stateへ同期する。
 
 例：
 
@@ -882,8 +898,19 @@ Fluid Port容量：25,000
 
 Dimensional Storageに十分な在庫あり
 
-→ 17,000供給
-→ Fluid Port：25,000
+→ 12,000供給
+→ Fluid Port：20,000
+```
+
+例：
+
+```text
+Fluid Port容量：25,000
+維持目標：20,000
+現在：25,000
+
+→ 5,000をDimensional Storageへ返却
+→ Fluid Port：20,000
 ```
 
 Dimensional Storageの在庫が不足している場合は、存在する数量のみ供給する。

@@ -7,6 +7,7 @@ local REFILL_THRESHOLD_STACKS = 4
 local REQUEST_BUFFER_SLOTS = MAX_ITEM_REQUESTS * REQUEST_STACKS
 local STORAGE_LIST_COLUMNS = 10
 local FLUID_PORT_CAPACITY = 25000
+local FLUID_REQUEST_TARGET = 20000
 local FLUID_STORAGE_TEMPERATURE_VERSION = 1
 local NORMAL_QUALITY = "normal"
 local TRANSLATION_KIND_ITEM = "item"
@@ -1241,6 +1242,24 @@ local function return_unrequested_fluid(port)
     port.materialized = {name = fluid.name, amount = 0, temperature = normalise_fluid_temperature(fluid.name, fluid.temperature)}
   end
 
+  if fluid.amount > FLUID_REQUEST_TARGET then
+    local before_amount = fluid.amount
+    local temperature = normalise_fluid_temperature(fluid.name, fluid.temperature)
+    set_fluidbox_content(port.entity, fluid.name, FLUID_REQUEST_TARGET, temperature)
+    fluid = port.entity.fluidbox and port.entity.fluidbox[1]
+    local after_amount = (fluid and fluid.name == port.request and fluid.amount) or 0
+    local removed = before_amount - after_amount
+    if removed > 0 then
+      add_fluid_to_storage(port.request, removed, temperature)
+    end
+  end
+
+  if not (fluid and fluid.name == port.request and fluid.amount and fluid.amount > 0) then
+    port.materialized.amount = 0
+    port.materialized.temperature = normalise_fluid_temperature(port.request, nil)
+    return
+  end
+
   port.materialized.amount = fluid.amount
   port.materialized.temperature = normalise_fluid_temperature(fluid.name, fluid.temperature)
 end
@@ -1271,9 +1290,9 @@ local function process_fluid_ports()
       if fluid and fluid.name == port.request then
         current = fluid.amount
       elseif fluid and fluid.amount and fluid.amount > 0 then
-        current = FLUID_PORT_CAPACITY
+        current = FLUID_REQUEST_TARGET
       end
-      local missing = FLUID_PORT_CAPACITY - current
+      local missing = FLUID_REQUEST_TARGET - current
       if missing > 0 then
         local key = fluid_key(port.request)
         grouped[key] = grouped[key] or {}
