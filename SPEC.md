@@ -604,6 +604,16 @@ Dimensional Storageに保存済みのPrototype名またはQuality Prototype名�
 
 Item PortのGUIには最低限以下を表示する。
 
+Item Portの物理Inventoryは、Factorio標準のContainer GUIで表示する。
+
+プレイヤーは標準Container GUIを通じて、Item Portの48スロットInventoryへ手動投入、手動取り出し、Shiftクリック、スタック移動、スタック分割、品質付きアイテム操作を行える。
+
+Dimensional Port独自のRequest設定およびDimensional Storage一覧は、標準Container GUIの右側にFactorio Runtime APIのrelative GUIとして表示する。
+
+Item Portを開く際に標準Container GUIを閉じてはならない。
+
+Fluid PortはItem Portと異なり、現時点では従来どおり独自GUIをscreen GUIとして表示する。
+
 #### Request設定
 
 Item Portでは常にRequest設定を表示する。

@@ -1396,9 +1396,15 @@ local function get_open_port(player)
   return nil, nil
 end
 
+local function get_port_gui_frame(player)
+  return player.gui.relative.dimensional_port_frame or player.gui.screen.dimensional_port_frame
+end
+
 local function destroy_gui(player)
-  local root = player.gui.screen.dimensional_port_frame
-  if root then root.destroy() end
+  local screen_root = player.gui.screen.dimensional_port_frame
+  if screen_root then screen_root.destroy() end
+  local relative_root = player.gui.relative.dimensional_port_frame
+  if relative_root then relative_root.destroy() end
   if storage.players and storage.players[player.index] then
     local state = storage.players[player.index]
     state.port_type = nil
@@ -1751,7 +1757,7 @@ local function add_storage_table(parent, player, search)
 end
 
 local function refresh_storage_list(player, force_rebuild)
-  local frame = player.gui.screen.dimensional_port_frame
+  local frame = get_port_gui_frame(player)
   if not frame then return end
   local storage_frame = frame.dimensional_port_storage_frame
   if not storage_frame then return end
@@ -1812,14 +1818,25 @@ local function build_gui(player, port, port_type)
   state.search = state.search or ""
   state.storage_gui = {signature = "", dirty = true}
 
-  local frame = player.gui.screen.add{
+  local frame_params = {
     type = "frame",
     name = "dimensional_port_frame",
     direction = "vertical"
   }
-  frame.auto_center = true
+  local frame
+  if port_type == "item" then
+    frame_params.anchor = {
+      gui = defines.relative_gui_type.container_gui,
+      position = defines.relative_gui_position.right,
+      name = names.item_port_entity
+    }
+    frame = player.gui.relative.add(frame_params)
+  else
+    frame = player.gui.screen.add(frame_params)
+    frame.auto_center = true
+  end
   local title_flow = frame.add{type = "flow", direction = "horizontal"}
-  title_flow.drag_target = frame
+  if port_type ~= "item" then title_flow.drag_target = frame end
   title_flow.add{
     type = "label",
     caption = {"dimensional-port.title"},
@@ -1828,7 +1845,7 @@ local function build_gui(player, port, port_type)
   local title_spacer = title_flow.add{type = "empty-widget"}
   title_spacer.style.horizontally_stretchable = true
   title_spacer.style.height = 24
-  title_spacer.drag_target = frame
+  if port_type ~= "item" then title_spacer.drag_target = frame end
   title_flow.add{
     type = "sprite-button",
     name = "dimensional_port_close",
@@ -1842,7 +1859,9 @@ local function build_gui(player, port, port_type)
     add_fluid_request(frame, port)
   end
   add_storage_list(frame, player, state.search)
-  player.opened = frame
+  if port_type ~= "item" then
+    player.opened = frame
+  end
 end
 
 local function refresh_gui(player)
@@ -2019,7 +2038,7 @@ script.on_nth_tick(UPDATE_INTERVAL, function()
   sync_dimensional_combinators(false)
   for _, player in pairs(game.connected_players) do
     local state = storage.players and storage.players[player.index]
-    local frame = player.gui.screen.dimensional_port_frame
+    local frame = get_port_gui_frame(player)
     if frame and state and state.port_type == "fluid" and changed_fluid_requests[state.unit_number] then
       refresh_gui(player)
     else
@@ -2035,7 +2054,6 @@ script.on_event(defines.events.on_gui_opened, function(event)
   local entity = event.entity
   if not (entity and entity.valid) then return end
   if entity.name == names.item_port_entity then
-    player.opened = nil
     local port = storage.item_ports[entity.unit_number]
     if port then build_gui(player, port, "item") end
   elseif entity.name == names.fluid_port_entity then
@@ -2050,6 +2068,15 @@ end)
 script.on_event(defines.events.on_gui_closed, function(event)
   local player = game.get_player(event.player_index)
   if not player then return end
+  local state = storage.players and storage.players[player.index]
+  if event.entity and event.entity.valid and event.entity.name == names.item_port_entity then
+    destroy_gui(player)
+    return
+  end
+  if state and state.port_type == "item" and event.gui_type == defines.gui_type.entity then
+    destroy_gui(player)
+    return
+  end
   if event.element and event.element.valid and event.element.name == "dimensional_port_frame" then
     destroy_gui(player)
   end
@@ -2063,6 +2090,10 @@ script.on_event(defines.events.on_gui_click, function(event)
   if not player then return end
   local tags = element.tags
   if tags.action == "close" then
+    local state = storage.players and storage.players[player.index]
+    if state and state.port_type == "item" then
+      player.opened = nil
+    end
     destroy_gui(player)
     return
   end
