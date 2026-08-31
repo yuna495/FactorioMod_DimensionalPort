@@ -15,8 +15,17 @@ local STORAGE_ENTRY_PREFIX = "dimensional_port_storage_entry_"
 local STORAGE_SIGNATURE_SEPARATOR = "\31"
 local CIRCUIT_SIGNAL_MAX = 2147483647
 local COMBINATOR_REGISTRY_VERSION = 1
+local VORTEX_RENDERING_CLEANUP_VERSION = 3
 
 local migrate_fluid_storage_temperature
+
+local function cleanup_old_vortex_renderings()
+  if storage.vortex_rendering_cleanup_version == VORTEX_RENDERING_CLEANUP_VERSION then return end
+  rendering.clear(script.mod_name)
+  storage.vortex_renderings = nil
+  storage.vortex_rendering_version = nil
+  storage.vortex_rendering_cleanup_version = VORTEX_RENDERING_CLEANUP_VERSION
+end
 
 local function fluid_default_temperature(name)
   local prototype = prototypes.fluid and prototypes.fluid[name]
@@ -70,6 +79,7 @@ local function ensure_storage()
   if storage.fluid_temperature_storage_version ~= FLUID_STORAGE_TEMPERATURE_VERSION and migrate_fluid_storage_temperature then
     migrate_fluid_storage_temperature()
   end
+  cleanup_old_vortex_renderings()
 end
 
 local function quality_name(quality)
@@ -754,29 +764,13 @@ local function rebuild_ports()
   storage.fluid_ports = rebuilt_fluid_ports
 end
 
-local function draw_vortex(entity)
-  rendering.draw_animation{
-    animation = "dimensional-port-vortex",
-    target = {
-      entity = entity,
-      offset = {0, -0.37}
-    },
-    surface = entity.surface,
-    x_scale = 0.14,
-    y_scale = 0.15,
-    render_layer = "object-under"
-  }
-end
-
 local function on_entity_created(entity)
   ensure_storage()
   if not (entity and entity.valid) then return end
   if entity.name == names.item_port_entity then
     register_item_port(entity)
-    draw_vortex(entity)
   elseif entity.name == names.fluid_port_entity then
     register_fluid_port(entity)
-    draw_vortex(entity)
   elseif entity.name == names.combinator_entity then
     register_dimensional_combinator(entity)
   end

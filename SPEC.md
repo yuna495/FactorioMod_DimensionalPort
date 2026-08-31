@@ -84,11 +84,15 @@ Item Portは固体物質を転送する装置として、裂孔周辺に小さ�
 
 静止状態でも床模様ではなく設置された設備として認識できるよう、本体スプライトと影によって厚みと立体感を持たせる。
 
-ただし多数設置時のUPSを考慮し、アニメーションはcontrol stageで駆動せず、FactorioのPrototype graphics機能で表現可能な範囲に限定する。
+ただし多数設置時のUPSを考慮し、アニメーションは毎tickのcontrol stage処理で駆動してはならない。
 
-既存のContainer Prototypeを維持する初期実装では、FactorioのPrototype graphics機能で安全に扱える静的スプライトと影を使用し、黒い裂孔と白い歪みは静止画上の表現として実装する。
+既存のContainer Prototypeを維持する初期実装では、ポート画像を背景・前景・影に分割し、中央の渦はEntity Prototypeの`stateless_visualisation`によるAnimationとして表現する。
 
-別速度の渦アニメーションは、Item PortのEntity種別やruntime処理を変更せずに実現可能な方法を確認できた場合に追加する。
+本体の静止スプライトは配置プレビューおよびghost表示でも中央が地面まで透けないように保持する。
+
+渦Animationには前景フレームを同じAnimation layer内で含める。現行の前景画像の中央が完全透過ではない場合は、画像を編集せず渦の表示を優先するため、渦を同visualisation内の後段レイヤーとして描画する。前景による完全な渦遮蔽が必要な場合は、前景画像の中央透過を別途調整する。
+
+渦描画はLuaRenderingや補助EntityではなくPrototype graphics側で完結させ、ポート周辺の他Entityとの前後関係はFactorio標準のEntity描画順に従わせる。
 
 外観の変更によって、Item Portの基本機能・保存データ・設置済みEntityとの互換性を不必要に損なわない設計とする。
 
@@ -794,11 +798,15 @@ Pipe接続部はFactorio上で接続方向が分かりにくくならないよ�
 
 静止状態でも床模様ではなく設置された設備として認識できるよう、本体スプライトと影によって厚みと立体感を持たせる。
 
-ただし多数設置時のUPSを考慮し、アニメーションはcontrol stageで駆動せず、FactorioのPrototype graphics機能で表現可能な範囲に限定する。
+ただし多数設置時のUPSを考慮し、アニメーションは毎tickのcontrol stage処理で駆動してはならない。
 
-既存のPipe Prototypeを維持する初期実装では、FactorioのPrototype graphics機能で安全に扱える静的スプライトと影を使用し、黒い裂孔と白い歪みは静止画上の表現として実装する。
+既存のPipe Prototypeを維持する初期実装では、ポート画像を背景・前景に分割し、中央の渦はEntity Prototypeの`stateless_visualisation`によるAnimationとして表現する。
 
-別速度の渦アニメーションは、Fluid PortのEntity種別、Pipe接続挙動、またはruntime処理を変更せずに実現可能な方法を確認できた場合に追加する。
+本体の静止スプライトは配置プレビューおよびghost表示でも中央が地面まで透けないように保持する。
+
+渦Animationには前景フレームを同じAnimation layer内で含める。現行の前景画像の中央が完全透過ではない場合は、画像を編集せず渦の表示を優先するため、渦を同visualisation内の後段レイヤーとして描画する。前景による完全な渦遮蔽が必要な場合は、前景画像の中央透過を別途調整する。
+
+渦描画はLuaRenderingや補助EntityではなくPrototype graphics側で完結させ、ポート周辺の他Entityとの前後関係はFactorio標準のEntity描画順に従わせる。
 
 ---
 
